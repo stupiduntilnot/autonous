@@ -3,12 +3,8 @@ use reqwest::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use std::env;
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::Duration;
-use tempfile::NamedTempFile;
+use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
@@ -18,15 +14,16 @@ struct Config {
     timeout: u64,
     sleep_seconds: u64,
     drop_pending: bool,
-    use_codex: bool,
-    codex_workdir: PathBuf,
-    history_window: usize,
+    pending_window_seconds: u64,
+    worker_instance_id: String,
+    suicide_every: u64,
 }
 
 impl Config {
     fn from_env() -> Result<Self> {
         let token = env::var("TELEGRAM_BOT_TOKEN")
             .context("TELEGRAM_BOT_TOKEN is required in environment")?;
+
         let offset = env::var("TG_OFFSET_START")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
@@ -43,17 +40,17 @@ impl Config {
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true);
-        let use_codex = env::var("USE_CODEX")
+        let pending_window_seconds = env::var("TG_PENDING_WINDOW_SECONDS")
             .ok()
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
-        let codex_workdir = PathBuf::from(
-            env::var("CODEX_WORKDIR").unwrap_or_else(|_| "/workspace".to_string()),
-        );
-        let history_window = env::var("TG_HISTORY_WINDOW")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(60);
+        let worker_instance_id =
+            env::var("WORKER_INSTANCE_ID").unwrap_or_else(|_| "W000000".to_string());
+        let suicide_every = env::var("WORKER_SUICIDE_EVERY")
             .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(12);
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(2);
 
         Ok(Self {
             api_base: format!("https://api.telegram.org/bot{}", token),
@@ -61,9 +58,9 @@ impl Config {
             timeout,
             sleep_seconds,
             drop_pending,
-            use_codex,
-            codex_workdir,
-            history_window,
+            pending_window_seconds,
+            worker_instance_id,
+            suicide_every,
         })
     }
 }
@@ -128,54 +125,29 @@ impl App {
         Ok(())
     }
 
-    fn recent_history(&self, chat_id: i64, limit: usize) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.db.prepare(
-            "SELECT role, text
-             FROM history
-             WHERE chat_id = ?1
-             ORDER BY id DESC
-             LIMIT ?2",
-        )?;
-        let mut rows = stmt.query(params![chat_id, limit as i64])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            let role: String = row.get(0)?;
-            let text: String = row.get(1)?;
-            out.push((role, text));
-        }
-        out.reverse();
-        Ok(out)
-    }
-
-    fn build_prompt_with_history(&self, chat_id: i64, user_text: &str) -> Result<String> {
-        let history = self.recent_history(chat_id, self.config.history_window)?;
-        let history_text = if history.is_empty() {
-            "(no history yet)".to_string()
-        } else {
-            history
-                .into_iter()
-                .map(|(role, text)| format!("{role}: {}", text.replace('\n', " ")))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let prompt = format!(
-            "You are an autonomous coding agent controlled from Telegram.\n\
-             Keep replies concise and executable.\n\
-             If asked to modify files, do it directly in the workspace.\n\n\
-             Recent chat history:\n\
-             {history_text}\n\n\
-             Current user message:\n\
-             {user_text}\n"
-        );
-        Ok(prompt)
-    }
-
-    async fn bootstrap_offset(&self) -> Result<i64> {
+    async fn bootstrap_offset(&self, pending_window_seconds: u64) -> Result<i64> {
         let updates = self.get_updates(0, 0).await?;
-        let next = updates
-            .last()
-            .map(|u| u.update_id + 1)
-            .unwrap_or(0_i64);
+        if updates.is_empty() {
+            return Ok(0);
+        }
+
+        let now = current_unix_timestamp();
+        let cutoff = now.saturating_sub(pending_window_seconds as i64);
+
+        if let Some(update_id) = updates
+            .iter()
+            .find(|u| {
+                u.message
+                    .as_ref()
+                    .map(|m| m.date >= cutoff)
+                    .unwrap_or(false)
+            })
+            .map(|u| u.update_id)
+        {
+            return Ok(update_id);
+        }
+
+        let next = updates.last().map(|u| u.update_id + 1).unwrap_or(0_i64);
         Ok(next)
     }
 
@@ -212,69 +184,6 @@ impl App {
             .context("telegram sendMessage request failed")?;
         Ok(())
     }
-
-    fn ensure_codex_auth(&self) -> Result<()> {
-        if !self.config.use_codex {
-            return Ok(());
-        }
-        if !command_exists("codex") {
-            return Ok(());
-        }
-        let Some(key) = env::var("OPENAI_API_KEY").ok() else {
-            eprintln!("OPENAI_API_KEY missing; skipping codex login");
-            return Ok(());
-        };
-
-        let mut child = Command::new("codex")
-            .arg("login")
-            .arg("--with-api-key")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("failed to start codex login")?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(key.as_bytes())
-                .context("failed to write key to codex login stdin")?;
-        }
-        let _ = child.wait();
-        Ok(())
-    }
-
-    fn run_agent(&self, prompt: &str) -> Result<String> {
-        if !self.config.use_codex {
-            return Ok(format!("Echo: {prompt}"));
-        }
-        if !command_exists("codex") {
-            return Ok("Agent error: codex CLI not found on PATH.".to_string());
-        }
-
-        let out_file = NamedTempFile::new()?;
-        let out_path = out_file.path().to_path_buf();
-
-        let output = Command::new("codex")
-            .arg("exec")
-            .arg("--sandbox")
-            .arg("workspace-write")
-            .arg("--skip-git-repo-check")
-            .arg("-C")
-            .arg(&self.config.codex_workdir)
-            .arg("--output-last-message")
-            .arg(&out_path)
-            .arg(prompt)
-            .output()
-            .context("failed to run codex exec")?;
-
-        let reply = fs::read_to_string(&out_path).unwrap_or_default();
-        if output.status.success() && !reply.trim().is_empty() {
-            return Ok(reply);
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last = stderr.lines().last().unwrap_or("unknown codex error").trim();
-        Ok(format!("Agent error: Codex failed ({last})."))
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,6 +202,7 @@ struct Update {
 struct Message {
     chat: Chat,
     text: Option<String>,
+    date: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -312,24 +222,36 @@ async fn main() -> Result<()> {
 
     let db_path = env::var("TG_DB_PATH").unwrap_or_else(|_| "/state/agent.db".to_string());
     if let Some(parent) = Path::new(&db_path).parent() {
-        fs::create_dir_all(parent)
+        std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create db directory {}", parent.display()))?;
     }
     let db = Connection::open(&db_path).with_context(|| format!("failed to open db at {db_path}"))?;
 
     let app = App::new(config.clone(), db)?;
     app.init_db()?;
-    app.ensure_codex_auth()?;
 
-    if let Some(saved) = app.load_offset()? {
+    let had_saved_offset = if let Some(saved) = app.load_offset()? {
         config.offset = saved;
-    }
-    if config.drop_pending {
-        config.offset = app.bootstrap_offset().await?;
+        true
+    } else {
+        false
+    };
+
+    if config.drop_pending && !had_saved_offset {
+        config.offset = app.bootstrap_offset(config.pending_window_seconds).await?;
         app.save_offset(config.offset)?;
     }
 
-    println!("agent loop running (Ctrl+C to stop)");
+    let mut handled_count: u64 = 0;
+
+    println!(
+        "dummy worker running id={} suicide_every={} pending_window_seconds={} had_saved_offset={}",
+        config.worker_instance_id,
+        config.suicide_every,
+        config.pending_window_seconds,
+        had_saved_offset
+    );
+
     loop {
         let updates = match app.get_updates(config.offset, config.timeout).await {
             Ok(v) => v,
@@ -355,18 +277,29 @@ async fn main() -> Result<()> {
             }
 
             let chat_id = message.chat.id;
-            println!("recv chat_id={} text={}", chat_id, text);
+            handled_count += 1;
+
+            let reply = format!(
+                "[DummyWorker:{} #{}] {}",
+                config.worker_instance_id, handled_count, text
+            );
 
             let _ = app.append_history(chat_id, "user", &text);
-            let prompt = app.build_prompt_with_history(chat_id, &text)?;
-            let reply = app
-                .run_agent(&prompt)
-                .unwrap_or_else(|e| format!("Agent error: {e:#}"));
             let _ = app.append_history(chat_id, "assistant", &reply);
 
+            println!("recv chat_id={} text={}", chat_id, text);
             println!("send chat_id={} text={}", chat_id, reply);
+
             if let Err(err) = app.send_message(chat_id, &reply).await {
                 eprintln!("sendMessage error: {err:#}");
+            }
+
+            if handled_count % config.suicide_every == 0 {
+                eprintln!(
+                    "dummy worker id={} handled {} messages; exiting intentionally",
+                    config.worker_instance_id, handled_count
+                );
+                std::process::exit(17);
             }
         }
 
@@ -374,13 +307,11 @@ async fn main() -> Result<()> {
     }
 }
 
-fn command_exists(name: &str) -> bool {
-    Command::new("sh")
-        .arg("-lc")
-        .arg(format!("command -v {name} >/dev/null 2>&1"))
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+fn current_unix_timestamp() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn truncate_for_telegram(input: &str, max_chars: usize) -> String {
