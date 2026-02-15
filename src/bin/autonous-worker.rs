@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use reqwest::Client;
-use rusqlite::{params, Connection, OptionalExtension};
-use serde::Deserialize;
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9,20 +9,28 @@ use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
 struct Config {
-    api_base: String,
+    telegram_api_base: String,
     offset: i64,
     timeout: u64,
     sleep_seconds: u64,
     drop_pending: bool,
     pending_window_seconds: u64,
+    pending_max_messages: usize,
+    history_window: usize,
     worker_instance_id: String,
     suicide_every: u64,
+    openai_api_key: String,
+    openai_chat_completions_url: String,
+    openai_model: String,
+    system_prompt: String,
 }
 
 impl Config {
     fn from_env() -> Result<Self> {
-        let token = env::var("TELEGRAM_BOT_TOKEN")
+        let telegram_token = env::var("TELEGRAM_BOT_TOKEN")
             .context("TELEGRAM_BOT_TOKEN is required in environment")?;
+        let openai_api_key =
+            env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is required in environment")?;
 
         let offset = env::var("TG_OFFSET_START")
             .ok()
@@ -43,26 +51,54 @@ impl Config {
         let pending_window_seconds = env::var("TG_PENDING_WINDOW_SECONDS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(60);
+            .unwrap_or(600);
+        let pending_max_messages = env::var("TG_PENDING_MAX_MESSAGES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(50);
+        let history_window = env::var("TG_HISTORY_WINDOW")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(12);
         let worker_instance_id =
             env::var("WORKER_INSTANCE_ID").unwrap_or_else(|_| "W000000".to_string());
         let suicide_every = env::var("WORKER_SUICIDE_EVERY")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(2);
+            .unwrap_or(0);
+
+        let openai_chat_completions_url = env::var("OPENAI_CHAT_COMPLETIONS_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1/chat/completions".to_string());
+        let openai_model = env::var("OPENAI_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        let system_prompt = env::var("WORKER_SYSTEM_PROMPT").unwrap_or_else(|_| {
+            "你是 autonous 的执行 Worker。回复简洁、准确；需要时给出可执行步骤。".to_string()
+        });
 
         Ok(Self {
-            api_base: format!("https://api.telegram.org/bot{}", token),
+            telegram_api_base: format!("https://api.telegram.org/bot{}", telegram_token),
             offset,
             timeout,
             sleep_seconds,
             drop_pending,
             pending_window_seconds,
+            pending_max_messages,
+            history_window,
             worker_instance_id,
             suicide_every,
+            openai_api_key,
+            openai_chat_completions_url,
+            openai_model,
+            system_prompt,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct QueueTask {
+    id: i64,
+    chat_id: i64,
+    text: String,
 }
 
 struct App {
@@ -74,7 +110,7 @@ struct App {
 impl App {
     fn new(config: Config, db: Connection) -> Result<Self> {
         let http = Client::builder()
-            .timeout(Duration::from_secs(config.timeout + 10))
+            .timeout(Duration::from_secs(config.timeout + 20))
             .build()
             .context("failed to build http client")?;
 
@@ -95,6 +131,20 @@ impl App {
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS inbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                update_id INTEGER NOT NULL UNIQUE,
+                chat_id INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                message_date INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                locked_at INTEGER,
+                error TEXT,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_inbox_status_id ON inbox(status, id);
             ",
         )?;
         Ok(())
@@ -125,7 +175,131 @@ impl App {
         Ok(())
     }
 
-    async fn bootstrap_offset(&self, pending_window_seconds: u64) -> Result<i64> {
+    fn recent_history(&self, chat_id: i64, limit: usize) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.db.prepare(
+            "SELECT role, text
+             FROM history
+             WHERE chat_id = ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+
+        let mut rows = stmt.query(params![chat_id, limit as i64])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            let role: String = row.get(0)?;
+            let text: String = row.get(1)?;
+            out.push((role, text));
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    fn build_messages(&self, chat_id: i64, user_text: &str) -> Result<Vec<OpenAIMessage>> {
+        let mut messages = Vec::new();
+        messages.push(OpenAIMessage {
+            role: "system".to_string(),
+            content: self.config.system_prompt.clone(),
+        });
+
+        for (role, text) in self.recent_history(chat_id, self.config.history_window)? {
+            let mapped = if role == "assistant" { "assistant" } else { "user" };
+            messages.push(OpenAIMessage {
+                role: mapped.to_string(),
+                content: text,
+            });
+        }
+
+        messages.push(OpenAIMessage {
+            role: "user".to_string(),
+            content: user_text.to_string(),
+        });
+
+        Ok(messages)
+    }
+
+    fn enqueue_message(&self, update_id: i64, chat_id: i64, text: &str, message_date: i64) -> Result<bool> {
+        let inserted = self.db.execute(
+            "INSERT OR IGNORE INTO inbox (update_id, chat_id, text, message_date, status, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'queued', unixepoch())",
+            params![update_id, chat_id, text, message_date],
+        )?;
+        Ok(inserted > 0)
+    }
+
+    fn has_runnable_tasks(&self) -> Result<bool> {
+        let exists: Option<i64> = self
+            .db
+            .query_row(
+                "SELECT 1 FROM inbox WHERE status IN ('queued', 'failed') ORDER BY id LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(exists.is_some())
+    }
+
+    fn claim_next_task(&mut self) -> Result<Option<QueueTask>> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let task: Option<QueueTask> = tx
+            .query_row(
+                "SELECT id, chat_id, text
+                 FROM inbox
+                 WHERE status IN ('queued', 'failed')
+                 ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, id
+                 LIMIT 1",
+                [],
+                |r| {
+                    Ok(QueueTask {
+                        id: r.get(0)?,
+                        chat_id: r.get(1)?,
+                        text: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        if let Some(t) = &task {
+            tx.execute(
+                "UPDATE inbox
+                 SET status = 'in_progress',
+                     attempts = attempts + 1,
+                     locked_at = unixepoch(),
+                     error = NULL,
+                     updated_at = unixepoch()
+                 WHERE id = ?1",
+                params![t.id],
+            )?;
+        }
+
+        tx.commit()?;
+        Ok(task)
+    }
+
+    fn mark_task_done(&self, task_id: i64) -> Result<()> {
+        self.db.execute(
+            "UPDATE inbox
+             SET status = 'done', updated_at = unixepoch(), error = NULL
+             WHERE id = ?1",
+            params![task_id],
+        )?;
+        Ok(())
+    }
+
+    fn mark_task_failed(&self, task_id: i64, error: &str) -> Result<()> {
+        self.db.execute(
+            "UPDATE inbox
+             SET status = 'failed', updated_at = unixepoch(), error = ?2
+             WHERE id = ?1",
+            params![task_id, truncate_for_telegram(error, 1000)],
+        )?;
+        Ok(())
+    }
+
+    async fn bootstrap_offset(&self, pending_window_seconds: u64, pending_max_messages: usize) -> Result<i64> {
         let updates = self.get_updates(0, 0).await?;
         if updates.is_empty() {
             return Ok(0);
@@ -134,27 +308,27 @@ impl App {
         let now = current_unix_timestamp();
         let cutoff = now.saturating_sub(pending_window_seconds as i64);
 
-        if let Some(update_id) = updates
+        let mut in_window: Vec<&Update> = updates
             .iter()
-            .find(|u| {
-                u.message
-                    .as_ref()
-                    .map(|m| m.date >= cutoff)
-                    .unwrap_or(false)
-            })
-            .map(|u| u.update_id)
-        {
-            return Ok(update_id);
+            .filter(|u| u.message.as_ref().map(|m| m.date >= cutoff).unwrap_or(false))
+            .collect();
+
+        if in_window.is_empty() {
+            return Ok(updates.last().map(|u| u.update_id + 1).unwrap_or(0));
         }
 
-        let next = updates.last().map(|u| u.update_id + 1).unwrap_or(0_i64);
-        Ok(next)
+        if in_window.len() > pending_max_messages {
+            let start = in_window.len() - pending_max_messages;
+            in_window = in_window[start..].to_vec();
+        }
+
+        Ok(in_window.first().map(|u| u.update_id).unwrap_or(0))
     }
 
     async fn get_updates(&self, offset: i64, timeout: u64) -> Result<Vec<Update>> {
         let response = self
             .http
-            .get(format!("{}/getUpdates", self.config.api_base))
+            .get(format!("{}/getUpdates", self.config.telegram_api_base))
             .query(&[("timeout", timeout.to_string()), ("offset", offset.to_string())])
             .send()
             .await
@@ -177,12 +351,56 @@ impl App {
         };
 
         self.http
-            .post(format!("{}/sendMessage", self.config.api_base))
+            .post(format!("{}/sendMessage", self.config.telegram_api_base))
             .json(&req)
             .send()
             .await
             .context("telegram sendMessage request failed")?;
         Ok(())
+    }
+
+    async fn call_openai(&self, messages: Vec<OpenAIMessage>) -> Result<String> {
+        let req = OpenAIChatCompletionsRequest {
+            model: self.config.openai_model.clone(),
+            messages,
+            temperature: Some(0.2),
+        };
+
+        let resp = self
+            .http
+            .post(&self.config.openai_chat_completions_url)
+            .bearer_auth(&self.config.openai_api_key)
+            .json(&req)
+            .send()
+            .await
+            .context("openai request failed")?;
+
+        let status = resp.status();
+        let body = resp.text().await.context("failed reading openai response")?;
+
+        if !status.is_success() {
+            bail!(
+                "openai non-success status={} body={}",
+                status,
+                truncate_for_telegram(&body, 400)
+            );
+        }
+
+        let parsed: OpenAIChatCompletionsResponse = serde_json::from_str(&body).with_context(|| {
+            format!(
+                "failed to parse openai response: {}",
+                truncate_for_telegram(&body, 400)
+            )
+        })?;
+
+        let content = parsed
+            .choices
+            .first()
+            .map(|c| c.message.content.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "(empty model response)".to_string());
+
+        Ok(content)
     }
 }
 
@@ -210,10 +428,39 @@ struct Chat {
     id: i64,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct SendMessageRequest<'a> {
     chat_id: i64,
     text: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OpenAIChatCompletionsRequest {
+    model: String,
+    messages: Vec<OpenAIMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIChatCompletionsResponse {
+    choices: Vec<OpenAIChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIChoice {
+    message: OpenAIMessageResponse,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIMessageResponse {
+    content: String,
 }
 
 #[tokio::main]
@@ -227,7 +474,7 @@ async fn main() -> Result<()> {
     }
     let db = Connection::open(&db_path).with_context(|| format!("failed to open db at {db_path}"))?;
 
-    let app = App::new(config.clone(), db)?;
+    let mut app = App::new(config.clone(), db)?;
     app.init_db()?;
 
     let had_saved_offset = if let Some(saved) = app.load_offset()? {
@@ -238,22 +485,31 @@ async fn main() -> Result<()> {
     };
 
     if config.drop_pending && !had_saved_offset {
-        config.offset = app.bootstrap_offset(config.pending_window_seconds).await?;
+        config.offset = app
+            .bootstrap_offset(config.pending_window_seconds, config.pending_max_messages)
+            .await?;
         app.save_offset(config.offset)?;
     }
 
-    let mut handled_count: u64 = 0;
-
     println!(
-        "dummy worker running id={} suicide_every={} pending_window_seconds={} had_saved_offset={}",
+        "worker running id={} model={} pending_window_seconds={} pending_max_messages={} had_saved_offset={}",
         config.worker_instance_id,
-        config.suicide_every,
+        config.openai_model,
         config.pending_window_seconds,
+        config.pending_max_messages,
         had_saved_offset
     );
 
+    let mut handled_count: u64 = 0;
+
     loop {
-        let updates = match app.get_updates(config.offset, config.timeout).await {
+        let poll_timeout = if app.has_runnable_tasks()? {
+            0
+        } else {
+            config.timeout
+        };
+
+        let updates = match app.get_updates(config.offset, poll_timeout).await {
             Ok(v) => v,
             Err(err) => {
                 eprintln!("getUpdates error: {err:#}");
@@ -277,33 +533,52 @@ async fn main() -> Result<()> {
             }
 
             let chat_id = message.chat.id;
-            handled_count += 1;
-
-            let reply = format!(
-                "[DummyWorker:{} #{}] {}",
-                config.worker_instance_id, handled_count, text
-            );
-
-            let _ = app.append_history(chat_id, "user", &text);
-            let _ = app.append_history(chat_id, "assistant", &reply);
-
-            println!("recv chat_id={} text={}", chat_id, text);
-            println!("send chat_id={} text={}", chat_id, reply);
-
-            if let Err(err) = app.send_message(chat_id, &reply).await {
-                eprintln!("sendMessage error: {err:#}");
-            }
-
-            if handled_count % config.suicide_every == 0 {
-                eprintln!(
-                    "dummy worker id={} handled {} messages; exiting intentionally",
-                    config.worker_instance_id, handled_count
-                );
-                std::process::exit(17);
+            if let Err(err) = app.enqueue_message(update.update_id, chat_id, &text, message.date) {
+                eprintln!("enqueue error update_id={}: {err:#}", update.update_id);
             }
         }
 
-        sleep(Duration::from_secs(config.sleep_seconds)).await;
+        let Some(task) = app.claim_next_task()? else {
+            sleep(Duration::from_secs(config.sleep_seconds)).await;
+            continue;
+        };
+
+        handled_count += 1;
+        println!(
+            "process task_id={} chat_id={} text={}",
+            task.id,
+            task.chat_id,
+            truncate_for_telegram(&task.text, 200)
+        );
+
+        let result: Result<()> = async {
+            let messages = app.build_messages(task.chat_id, &task.text)?;
+            let reply = app.call_openai(messages).await?;
+            app.send_message(task.chat_id, &reply).await?;
+            app.append_history(task.chat_id, "user", &task.text)?;
+            app.append_history(task.chat_id, "assistant", &reply)?;
+            Ok(())
+        }
+        .await;
+
+        match result {
+            Ok(_) => {
+                let _ = app.mark_task_done(task.id);
+            }
+            Err(err) => {
+                let msg = format!("{}", err);
+                let _ = app.mark_task_failed(task.id, &msg);
+                eprintln!("task {} failed: {}", task.id, msg);
+            }
+        }
+
+        if config.suicide_every > 0 && handled_count % config.suicide_every == 0 {
+            eprintln!(
+                "worker id={} handled {} messages; exiting intentionally",
+                config.worker_instance_id, handled_count
+            );
+            std::process::exit(17);
+        }
     }
 }
 
