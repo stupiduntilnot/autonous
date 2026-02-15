@@ -14,10 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     nodejs \
     npm \
-    python3 \
+    sqlite3 \
     tini \
     build-essential \
     pkg-config \
+    libsqlite3-dev \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -30,10 +31,14 @@ RUN curl -fsSL https://sh.rustup.rs | bash -s -- -y --profile minimal --default-
 RUN npm install -g @openai/codex \
     && codex --version
 
-WORKDIR /app
+WORKDIR /workspace
 
-COPY startup.sh /app/startup.sh
-RUN chmod +x /app/startup.sh
+COPY Cargo.toml /workspace/Cargo.toml
+COPY src /workspace/src
+RUN cargo build --release --manifest-path /workspace/Cargo.toml
+
+COPY startup.sh /usr/local/bin/startup.sh
+RUN chmod +x /usr/local/bin/startup.sh
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["/app/startup.sh"]
+CMD ["/usr/local/bin/startup.sh"]
