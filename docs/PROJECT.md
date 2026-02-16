@@ -1,141 +1,60 @@
 # Autonous 项目文档
 
-更新时间：2026-02-15
+最后更新: 2026-02-16
 
 ## 1. 项目定位
-`autonous` 是一个通过 Telegram 远程驱动的 autonomous coding system。
+`autonous` 是一个通过 `Telegram` 远程驱动的自主编程系统（autonomous coding system），目前正在用 `Golang` 进行重写。
 
-当前阶段目标：
-1. 先把 runtime 做稳（Supervisor + Worker）。
-2. 保证状态可恢复（SQLite）。
-3. 在最小复杂度下持续演进能力（incremental evolution）。
+项目的核心目标是实现一个稳定、可观测、并且能够增量演进的自主系统。
 
-## 2. 从起点到现在的关键决策
+## 2. 核心架构原则
 
-## 2.1 Bootstrap 策略
-决策：从最小可运行环路开始，不做大而全设计。
-理由：先验证闭环，再迭代扩展，排障成本最低。
+### 2.1. 系统构成
+- 系统被划分为 `supervisor` 和 `worker` 两个进程，以解耦进程生命周期管理和任务执行。
+- 核心持久化层是一个单独的 `SQLite` 数据库。
 
-## 2.2 Telegram 作为第一控制面
-决策：先打通 Telegram Bot API，再容器化。
-理由：把 API 问题和容器问题分离，验证链路更快。
+### 2.2. Supervisor-Worker 关系
+- **`Supervisor`** 是系统的稳定内核，仅负责 `worker` 的进程生命周期（启动、监控、重启）。
+- **`Supervisor`** 必须保持中立和可验证。它**不会**读取、解析或存储任何来自用户或 `LLM` 的 `prompt` 或消息内容。
+- **`Worker`** 负责所有的业务逻辑，包括 `Telegram` 通信、任务执行以及与外部 `API` 的交互。
 
-## 2.3 Secret 管理
-决策：Secret 放在 host 环境（如 `~/.env`），运行时注入 container，不进 git。
-理由：降低泄漏风险，便于后续新增 keys。
+### 2.3. 执行与状态
+- **队列驱动执行 (Queue-Driven Execution)**: 所有传入的任务都被放入一个持久化的队列（`inbox` 表），并由一个单一消费者串行处理，以保证顺序性、可恢复性和可审计性。
+- **持久化的事实来源 (Persistent Source of Truth)**: 所有关键状态（例如，对话历史、任务队列、事件日志）都必须持久化到 `SQLite` 数据库中，以确保系统能从崩溃中恢复。
+- **可恢复的状态 (Recoverable State)**: Agent 的状态主要从持久化的数据库中派生，而不是从进程内存中。
+- **可裁剪的上下文 (Trimable Context)**: 提供给 `LLM` 的context必须被主动管理，以保持在 `token` 限制之内。
 
-## 2.4 Runtime 选择
-决策：容器 runtime 采用 Docker-compatible 方案（OrbStack 可用）；base image 用 `debian:bookworm-slim`。
-理由：工具链稳定、兼容性好、维护成本低。
+### 2.4. 可观测性 (Observability)
+- **统一事件日志 (Unified Event Log)**: 所有用于审计、调试和追踪的事件都将被记录在一个统一的 `events` 表中。
+- **层级化运行 ID (Hierarchical Run IDs)**: 使用一个通用的 `parent_run_id` 关系来为进程层级建模，从而实现因果链的追踪。
+- **事件命名约定 (Event Naming)**: 事件类型使用点 (`.`) 来为命名空间分层（例如, `llm_call.started`）。
 
-## 2.5 语言选择
-决策：核心 runtime 先用 Rust。
-理由：强类型 + 编译反馈 + 可交付单一 binary，适合自演化系统的稳定内核。
+## 3. 设计文档
+本文档提供一个宏观的概览。关于具体的实现计划，请参考各个 `milestone` 的文档：
 
-## 2.6 持久化选择
-决策：SQLite 作为 runtime source of truth。
-理由：本地单文件、零运维、事务可靠，适合 MVP 到中期扩展。
+- **[Milestone 0: 基础结构](./docs/milestone-0.md)**: 定义了已完成的 `MVP`。
+- **[Milestone 1: 可观测性计划](./docs/milestone-1.md)**: 详细说明了统一事件日志系统的实现计划。
+- **[Tool Call 设计](./docs/TOOLCALL_DESIGN.md)**: 描述了工具子系统的设计。
 
-## 2.7 架构切分
-决策：拆成 `autonous-supervisor` 和 `autonous-worker`。
-理由：把 lifecycle control 和 task execution 解耦。
+*一份用于指导开发辅助 `LLM` 的原则性文档位于 `AGENTS.md`。*
 
-## 2.8 Supervisor 硬边界
-决策：Supervisor 不接触 prompt/message 内容。
-理由：控制平面必须保持中立、稳定、可验证。
+## 4. 关键历史决策
+本部分作为项目生命周期中关键决策的存档。
 
-## 2.9 先做 Dummy Worker 再做真实 Worker
-决策：先用 deterministic crash-test（每 2 条消息自杀）验证重启链路。
-理由：先证明 lifecycle 可靠，再接入真实模型调用。
+- **启动策略 (Bootstrap Strategy)**: 从最小可验证的闭环开始，然后再进行扩展。
+- **控制平面 (Control Plane)**: 使用 `Telegram` 作为初始控制平面。
+- **密钥管理 (Secret Management)**: 在运行时通过环境变量注入密钥。
+- **运行时 (Runtime)**: 使用与 `Docker` 兼容的容器和 `debian:bookworm-slim` 基础镜像。
+- **语言选择 (Language Choice)**: 项目最初使用 `Rust` 编写，现在正在用 **`Golang`** 重写。
+- **持久化 (Persistence)**: 使用 `SQLite` 作为单一事实来源。
+- **执行模型 (Execution Model)**: 使用队列优先、单一消费者的模型来保证任务处理的可靠性。
+- **部署 (Deployment)**: 通过 `redeploy_autonous.sh` 脚本来标准化部署流程。
 
-## 2.10 Deployment 稳定化
-决策：增加 `scripts/redeploy_autonous.sh`，统一“删旧容器 -> build -> 启动 -> 清理”。
-理由：避免新旧 image/container 混用导致的调试噪声。
-
-## 2.11 从 local Codex CLI 转向 OpenAI API
-决策：Worker 不依赖本地 Codex CLI，直接调用 ChatGPT/OpenAI API。
-理由：降低 sandbox/CLI 进程耦合，行为更可控。
-
-## 2.12 Queue-first 执行模型
-决策：采用 SQLite inbox queue + single consumer 串行执行。
-理由：有序、可恢复、可审计。
-
-## 2.13 Pending 策略
-决策：cold start 才应用 pending filter；restart 依赖 offset/queue 续跑。
-理由：兼顾防洪峰和不丢消息。
-
-## 3. 当前架构（Current Baseline）
-
-## 3.1 组件
-1. `autonous-supervisor`
-- 负责 process lifecycle：start/restart/crash-loop detection/rollback hook。
-
-2. `autonous-worker`
-- 负责 Telegram ingress、queue processing、OpenAI API 调用、结果回发。
-
-## 3.2 责任边界
-1. Telegram 仅与 Worker 交互。
-2. Supervisor 不读取、不解析、不存储 prompt/message。
-3. Worker 承担全部业务语义与模型调用。
-
-## 3.3 数据模型（SQLite）
-1. `kv`
-- 系统游标与配置（如 `telegram_offset`）。
-
-2. `history`
-- 对话历史（`chat_id`, `role`, `text`, `created_at`）。
-
-3. `inbox`
-- 任务队列（`update_id unique`, `status`, `attempts`, `error` 等）。
-
-4. `supervisor_state` / `supervisor_revisions`
-- 生命周期与 revision 状态。
-
-## 3.4 执行流
-1. Worker 拉取 Telegram updates。
-2. 写入 `inbox`（去重）。
-3. 串行 claim 一条任务（single consumer）。
-4. 构造上下文并调用 OpenAI API。
-5. 发送 Telegram 回复。
-6. `inbox` 标记 done/failed，并记录错误。
-
-## 4. 与 `pi-mono` 思路对齐点
-1. 事件/消息采用 queue 驱动，避免并发乱序。
-2. source-of-truth 必须持久化，可重放。
-3. 运行时 context 可裁剪，历史记录可追溯。
-
-当前差异：
-- `autonous` 先聚焦 Telegram + SQLite + Rust minimal runtime，不引入更重的多模块体系。
-
-## 5. 配置约定（关键环境变量）
-1. Telegram
+## 5. 配置
+所有配置都通过环境变量进行管理。关键变量包括：
 - `TELEGRAM_BOT_TOKEN`
-- `TG_TIMEOUT`
-- `TG_SLEEP_SECONDS`
-- `TG_DROP_PENDING`
-- `TG_PENDING_WINDOW_SECONDS`
-- `TG_PENDING_MAX_MESSAGES`
-
-2. OpenAI
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
-- `OPENAI_CHAT_COMPLETIONS_URL`
-- `WORKER_SYSTEM_PROMPT`
-
-3. Runtime
-- `TG_DB_PATH`（默认 `/state/agent.db`）
-- `WORKER_SUICIDE_EVERY`（默认 0）
-
-## 6. 当前阶段结论
-1. Supervisor/Worker 分层已成立并验证。
-2. Worker 已切换到 OpenAI API 执行路径。
-3. 串行 queue 模型已落地（SQLite inbox）。
-4. 系统进入“可持续扩展”的下一阶段。
-
-## 7. 下一阶段建议
-1. 引入 retry policy（指数退避 + 最大重试）。
-2. 给 `inbox` 增加 dead-letter 语义（长期失败隔离）。
-3. 增加 queue/latency/error 的可观测指标与运维命令。
-
-## 8. 相关设计文档
-1. Tool Call 设计：`docs/TOOLCALL_DESIGN.md`
+- `TG_DB_PATH`
+- `INSTANCE_ID` (用于 `supervisor`)
+- `PARENT_RUN_ID` (用于 `worker`)
