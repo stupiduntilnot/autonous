@@ -10,3 +10,5 @@
 .ssh/
 backups/
 *.session
+
+.claude
