@@ -4,6 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::Path;
+use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 
@@ -18,6 +19,7 @@ struct Config {
     pending_max_messages: usize,
     history_window: usize,
     worker_instance_id: String,
+    run_id: String,
     suicide_every: u64,
     openai_api_key: String,
     openai_chat_completions_url: String,
@@ -63,6 +65,12 @@ impl Config {
             .unwrap_or(12);
         let worker_instance_id =
             env::var("WORKER_INSTANCE_ID").unwrap_or_else(|_| "W000000".to_string());
+        let run_id = format!(
+            "R{}-{}-{}",
+            current_unix_timestamp(),
+            process::id(),
+            worker_instance_id
+        );
         let suicide_every = env::var("WORKER_SUICIDE_EVERY")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -85,6 +93,7 @@ impl Config {
             pending_max_messages,
             history_window,
             worker_instance_id,
+            run_id,
             suicide_every,
             openai_api_key,
             openai_chat_completions_url,
@@ -98,6 +107,7 @@ impl Config {
 struct QueueTask {
     id: i64,
     chat_id: i64,
+    update_id: i64,
     text: String,
 }
 
@@ -145,6 +155,21 @@ impl App {
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch())
             );
             CREATE INDEX IF NOT EXISTS idx_inbox_status_id ON inbox(status, id);
+            CREATE TABLE IF NOT EXISTS task_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                update_id INTEGER,
+                phase TEXT NOT NULL,
+                status TEXT NOT NULL,
+                message TEXT,
+                error TEXT,
+                run_id TEXT NOT NULL,
+                worker_instance_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT (unixepoch())
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_audit_task_id ON task_audit(task_id, id);
+            CREATE INDEX IF NOT EXISTS idx_task_audit_phase ON task_audit(phase, created_at);
             ",
         )?;
         Ok(())
@@ -227,6 +252,49 @@ impl App {
         Ok(inserted > 0)
     }
 
+    fn get_task_id_by_update_id(&self, update_id: i64) -> Result<Option<i64>> {
+        let id: Option<i64> = self
+            .db
+            .query_row(
+                "SELECT id FROM inbox WHERE update_id = ?1",
+                params![update_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id)
+    }
+
+    fn log_task_event(
+        &self,
+        task_id: i64,
+        chat_id: i64,
+        update_id: Option<i64>,
+        phase: &str,
+        status: &str,
+        message: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let msg = message.map(|v| truncate_for_telegram(v, 1000));
+        let err = error.map(|v| truncate_for_telegram(v, 1000));
+        self.db.execute(
+            "INSERT INTO task_audit
+             (task_id, chat_id, update_id, phase, status, message, error, run_id, worker_instance_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                task_id,
+                chat_id,
+                update_id,
+                phase,
+                status,
+                msg,
+                err,
+                self.config.run_id,
+                self.config.worker_instance_id
+            ],
+        )?;
+        Ok(())
+    }
+
     fn has_runnable_tasks(&self) -> Result<bool> {
         let exists: Option<i64> = self
             .db
@@ -246,7 +314,7 @@ impl App {
 
         let task: Option<QueueTask> = tx
             .query_row(
-                "SELECT id, chat_id, text
+                "SELECT id, chat_id, update_id, text
                  FROM inbox
                  WHERE status IN ('queued', 'failed')
                  ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, id
@@ -256,7 +324,8 @@ impl App {
                     Ok(QueueTask {
                         id: r.get(0)?,
                         chat_id: r.get(1)?,
-                        text: r.get(2)?,
+                        update_id: r.get(2)?,
+                        text: r.get(3)?,
                     })
                 },
             )
@@ -492,8 +561,9 @@ async fn main() -> Result<()> {
     }
 
     println!(
-        "worker running id={} model={} pending_window_seconds={} pending_max_messages={} had_saved_offset={}",
+        "worker running id={} run_id={} model={} pending_window_seconds={} pending_max_messages={} had_saved_offset={}",
         config.worker_instance_id,
+        config.run_id,
         config.openai_model,
         config.pending_window_seconds,
         config.pending_max_messages,
@@ -533,8 +603,34 @@ async fn main() -> Result<()> {
             }
 
             let chat_id = message.chat.id;
-            if let Err(err) = app.enqueue_message(update.update_id, chat_id, &text, message.date) {
-                eprintln!("enqueue error update_id={}: {err:#}", update.update_id);
+            match app.enqueue_message(update.update_id, chat_id, &text, message.date) {
+                Ok(inserted) => {
+                    if inserted {
+                        if let Ok(Some(task_id)) = app.get_task_id_by_update_id(update.update_id) {
+                            let _ = app.log_task_event(
+                                task_id,
+                                chat_id,
+                                Some(update.update_id),
+                                "ingress",
+                                "info",
+                                Some(&text),
+                                None,
+                            );
+                            let _ = app.log_task_event(
+                                task_id,
+                                chat_id,
+                                Some(update.update_id),
+                                "queued",
+                                "ok",
+                                None,
+                                None,
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    eprintln!("enqueue error update_id={}: {err:#}", update.update_id);
+                }
             }
         }
 
@@ -550,11 +646,47 @@ async fn main() -> Result<()> {
             task.chat_id,
             truncate_for_telegram(&task.text, 200)
         );
+        let _ = app.log_task_event(
+            task.id,
+            task.chat_id,
+            Some(task.update_id),
+            "claimed",
+            "ok",
+            None,
+            None,
+        );
 
         let result: Result<()> = async {
             let messages = app.build_messages(task.chat_id, &task.text)?;
+            let _ = app.log_task_event(
+                task.id,
+                task.chat_id,
+                Some(task.update_id),
+                "model_request",
+                "info",
+                None,
+                None,
+            );
             let reply = app.call_openai(messages).await?;
+            let _ = app.log_task_event(
+                task.id,
+                task.chat_id,
+                Some(task.update_id),
+                "model_response",
+                "ok",
+                Some(&reply),
+                None,
+            );
             app.send_message(task.chat_id, &reply).await?;
+            let _ = app.log_task_event(
+                task.id,
+                task.chat_id,
+                Some(task.update_id),
+                "reply_sent",
+                "ok",
+                None,
+                None,
+            );
             app.append_history(task.chat_id, "user", &task.text)?;
             app.append_history(task.chat_id, "assistant", &reply)?;
             Ok(())
@@ -564,10 +696,35 @@ async fn main() -> Result<()> {
         match result {
             Ok(_) => {
                 let _ = app.mark_task_done(task.id);
+                let _ = app.log_task_event(
+                    task.id,
+                    task.chat_id,
+                    Some(task.update_id),
+                    "task_done",
+                    "ok",
+                    None,
+                    None,
+                );
             }
             Err(err) => {
                 let msg = format!("{}", err);
                 let _ = app.mark_task_failed(task.id, &msg);
+                let _ = app.log_task_event(
+                    task.id,
+                    task.chat_id,
+                    Some(task.update_id),
+                    "task_failed",
+                    "failed",
+                    None,
+                    Some(&msg),
+                );
+                let notify = format!("任务处理失败：{}", truncate_for_telegram(&msg, 600));
+                if let Err(send_err) = app.send_message(task.chat_id, &notify).await {
+                    eprintln!(
+                        "task {} failed to notify chat_id={}: {}",
+                        task.id, task.chat_id, send_err
+                    );
+                }
                 eprintln!("task {} failed: {}", task.id, msg);
             }
         }

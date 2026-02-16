@@ -8,13 +8,21 @@ use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
 struct Config {
+    /// Path to the worker binary that this supervisor will manage and restart.
     worker_bin: String,
+    /// The root directory of the workspace where the worker code resides. Used for Git operations and relative paths.
     workspace_dir: String,
+    /// Path to the SQLite database file used by the supervisor to persist its state (e.g., good revisions, crash counts).
     state_db_path: String,
+    /// Delay in seconds before restarting a worker process after it exits.
     restart_delay_seconds: u64,
+    /// The time window in seconds during which worker crashes are counted towards the crash threshold.
     crash_window_seconds: u64,
+    /// The number of crashes within `crash_window_seconds` that triggers a rollback or specific failure handling.
     crash_threshold: usize,
+    /// The minimum duration in seconds a worker must run to be considered "stable" and clear the crash counter.
     stable_run_seconds: u64,
+    /// A boolean flag indicating whether the supervisor should automatically attempt to roll back to a known good revision upon reaching the crash threshold.
     auto_rollback: bool,
 }
 
@@ -68,12 +76,13 @@ impl SupervisorState {
     fn init_schema(&self) -> Result<()> {
         self.db.execute_batch(
             "
+            -- Table to store information about different code revisions, used for rollback.
             CREATE TABLE IF NOT EXISTS supervisor_revisions (
-                revision TEXT PRIMARY KEY,
-                build_ok INTEGER NOT NULL DEFAULT 0,
-                health_ok INTEGER NOT NULL DEFAULT 0,
-                promoted_at INTEGER,
-                failure_reason TEXT
+                revision TEXT PRIMARY KEY, -- Git commit hash or other unique revision identifier.
+                build_ok INTEGER NOT NULL DEFAULT 0, -- 1 if the revision successfully built, 0 otherwise.
+                health_ok INTEGER NOT NULL DEFAULT 0, -- 1 if the worker from this revision ran stably, 0 otherwise.
+                promoted_at INTEGER, -- Unix timestamp when this revision was last marked as good/stable.
+                failure_reason TEXT -- Reason for failure if this revision was not good.
             );
             CREATE TABLE IF NOT EXISTS supervisor_state (
                 key TEXT PRIMARY KEY,
