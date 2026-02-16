@@ -7,14 +7,12 @@ WORKER_BIN="${WORKER_BIN:-${WORKSPACE_DIR}/bin/worker}"
 
 export WORKER_BIN
 
-mkdir -p /state
+mkdir -p /state "${WORKSPACE_DIR}/bin"
 
-if [[ ! -x "${SUPERVISOR_BIN}" || ! -x "${WORKER_BIN}" ]]; then
-  echo "Go binaries not found; building..."
-  cd "${WORKSPACE_DIR}"
-  CGO_ENABLED=1 go build -o "${SUPERVISOR_BIN}" ./cmd/supervisor
-  CGO_ENABLED=1 go build -o "${WORKER_BIN}" ./cmd/worker
-fi
+echo "building Go binaries..."
+cd "${WORKSPACE_DIR}"
+CGO_ENABLED=1 go build -o "${SUPERVISOR_BIN}" ./cmd/supervisor
+CGO_ENABLED=1 go build -o "${WORKER_BIN}" ./cmd/worker
 
 echo "startup launching supervisor"
 exec "${SUPERVISOR_BIN}"

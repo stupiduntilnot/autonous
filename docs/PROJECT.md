@@ -38,7 +38,33 @@
 
 *一份用于指导开发辅助 `LLM` 的原则性文档位于 `AGENTS.md`。*
 
-## 4. 关键历史决策
+## 4. 运行模型
+
+Docker 容器是 Agent 的服务器，**只启动一次**，持续运行。容器内是一对 Supervisor + Worker 进程。对 Agent 而言，不存在"宿主机"与"容器"的区别——它只知道自己是一对进程。
+
+### 4.1. Bootstrap 阶段（当前）
+
+Agent 尚不具备自我更新能力。代码修改由宿主机上的开发者（通过 Claude Code 等工具）完成：
+
+1. 宿主机修改代码（仓库通过 `-v` 挂载到容器内 `/workspace`）
+2. 进入容器编译新 binary
+3. Worker 退出后，Supervisor 自动启动新版本
+
+### 4.2. 自主阶段（目标）
+
+Agent 具备自我更新能力后，宿主机不再参与开发：
+
+1. 用户通过 Telegram 对话指示 Agent 实现功能
+2. Worker 修改代码 → 编译新 binary → kill 自己
+3. Supervisor 启动新版 Worker
+
+### 4.3. 容器管理原则
+
+- 容器使用 `--restart unless-stopped`，确保意外退出后自动恢复
+- 只有万不得已（如 Dockerfile 变更、基础镜像升级）才销毁重建
+- 所有持久状态存储在 SQLite 中，容器重建不会丢失数据（DB 文件在挂载卷上）
+
+## 5. 关键历史决策
 本部分作为项目生命周期中关键决策的存档。
 
 - **启动策略 (Bootstrap Strategy)**: 从最小可验证的闭环开始，然后再进行扩展。
@@ -50,7 +76,7 @@
 - **执行模型 (Execution Model)**: 使用队列优先、单一消费者的模型来保证任务处理的可靠性。
 - **部署 (Deployment)**: 通过 `redeploy_autonous.sh` 脚本来标准化部署流程。
 
-## 5. 配置
+## 6. 配置
 所有配置都通过环境变量进行管理。关键变量包括：
 - `TELEGRAM_BOT_TOKEN`
 - `OPENAI_API_KEY`
