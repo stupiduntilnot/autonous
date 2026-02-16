@@ -1,20 +1,20 @@
-# Milestone 0 - Basic Structure
+# [DONE] Milestone 0 - Basic Structure
 ## Goal
 Implement a minimal MVP: supervisor + worker + telegram + OpenAI API
 
 ## Deliverables
-* sumpervisor
-  - spawn worker
-  - monitor worker
-  - restart worker
-  - record worker version/build id
-* worker
-  - pull Telegram messages
-  - call OpenAI API
-  - send Model response to Telegram
-* Security
-  - Secrets (e.g. API tokens) must be injected via ENVIRONMENT VARIABLES
-  - During development, secrets should be injected into Docker container instead of hard-coded in Dockerfile or any startup script.
+- [DONE] Supervisor functionalities:
+  - [DONE] spawn worker
+  - [DONE] monitor worker
+  - [DONE] restart worker
+  - [DONE] record worker version/build id
+- [DONE] Worker functionalities:
+  - [DONE] pull Telegram messages
+  - [DONE] call OpenAI API
+  - [DONE] send Model response to Telegram
+- [DONE] Security requirements:
+  - [DONE] Secrets (e.g. API tokens) must be injected via ENVIRONMENT VARIABLES
+  - [DONE] During development, secrets should be injected into Docker container instead of hard-coded in Dockerfile or any startup script.
 
 # Milestone 1 - Observability
 
