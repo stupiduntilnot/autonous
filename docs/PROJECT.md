@@ -136,3 +136,6 @@
 1. 引入 retry policy（指数退避 + 最大重试）。
 2. 给 `inbox` 增加 dead-letter 语义（长期失败隔离）。
 3. 增加 queue/latency/error 的可观测指标与运维命令。
+
+## 8. 相关设计文档
+1. Tool Call 设计：`docs/TOOLCALL_DESIGN.md`
