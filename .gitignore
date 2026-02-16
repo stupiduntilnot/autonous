@@ -2,8 +2,11 @@
 .env.*
 *.log
 
-target/
+# Go
+/bin/
+*.exe
 
 .state/
 .ssh/
 backups/
+*.session

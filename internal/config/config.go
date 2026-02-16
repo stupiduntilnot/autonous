@@ -1,0 +1,116 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// SupervisorConfig holds configuration for the supervisor process.
+type SupervisorConfig struct {
+	WorkerBin           string
+	WorkspaceDir        string
+	StateDBPath         string
+	RestartDelaySeconds int
+	CrashWindowSeconds  int
+	CrashThreshold      int
+	StableRunSeconds    int
+	AutoRollback        bool
+}
+
+// LoadSupervisorConfig reads supervisor configuration from environment variables.
+func LoadSupervisorConfig() SupervisorConfig {
+	return SupervisorConfig{
+		WorkerBin:           envOrDefault("WORKER_BIN", "/workspace/bin/worker"),
+		WorkspaceDir:        envOrDefault("WORKSPACE_DIR", "/workspace"),
+		StateDBPath:         envOrDefault("TG_DB_PATH", "/state/agent.db"),
+		RestartDelaySeconds: envIntOrDefault("SUPERVISOR_RESTART_DELAY_SECONDS", 1),
+		CrashWindowSeconds:  envIntOrDefault("SUPERVISOR_CRASH_WINDOW_SECONDS", 300),
+		CrashThreshold:      envIntOrDefault("SUPERVISOR_CRASH_THRESHOLD", 3),
+		StableRunSeconds:    envIntOrDefault("SUPERVISOR_STABLE_RUN_SECONDS", 30),
+		AutoRollback:        envBoolOrDefault("SUPERVISOR_AUTO_ROLLBACK", false),
+	}
+}
+
+// WorkerConfig holds configuration for the worker process.
+type WorkerConfig struct {
+	TelegramAPIBase       string
+	Offset                int64
+	Timeout               int
+	SleepSeconds          int
+	DropPending           bool
+	PendingWindowSeconds  int64
+	PendingMaxMessages    int
+	HistoryWindow         int
+	WorkerInstanceID      string
+	RunID                 string
+	SuicideEvery          uint64
+	OpenAIAPIKey          string
+	OpenAIChatCompURL     string
+	OpenAIModel           string
+	SystemPrompt          string
+	DBPath                string
+}
+
+// LoadWorkerConfig reads worker configuration from environment variables.
+func LoadWorkerConfig() (WorkerConfig, error) {
+	telegramToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	if telegramToken == "" {
+		return WorkerConfig{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required in environment")
+	}
+	openaiKey := os.Getenv("OPENAI_API_KEY")
+	if openaiKey == "" {
+		return WorkerConfig{}, fmt.Errorf("OPENAI_API_KEY is required in environment")
+	}
+
+	workerInstanceID := envOrDefault("WORKER_INSTANCE_ID", "W000000")
+	runID := fmt.Sprintf("R%d-%d-%s", time.Now().Unix(), os.Getpid(), workerInstanceID)
+
+	return WorkerConfig{
+		TelegramAPIBase:      fmt.Sprintf("https://api.telegram.org/bot%s", telegramToken),
+		Offset:               int64(envIntOrDefault("TG_OFFSET_START", 0)),
+		Timeout:              envIntOrDefault("TG_TIMEOUT", 30),
+		SleepSeconds:         envIntOrDefault("TG_SLEEP_SECONDS", 1),
+		DropPending:          envBoolOrDefault("TG_DROP_PENDING", true),
+		PendingWindowSeconds: int64(envIntOrDefault("TG_PENDING_WINDOW_SECONDS", 600)),
+		PendingMaxMessages:   envIntOrDefault("TG_PENDING_MAX_MESSAGES", 50),
+		HistoryWindow:        envIntOrDefault("TG_HISTORY_WINDOW", 12),
+		WorkerInstanceID:     workerInstanceID,
+		RunID:                runID,
+		SuicideEvery:         uint64(envIntOrDefault("WORKER_SUICIDE_EVERY", 0)),
+		OpenAIAPIKey:         openaiKey,
+		OpenAIChatCompURL:    envOrDefault("OPENAI_CHAT_COMPLETIONS_URL", "https://api.openai.com/v1/chat/completions"),
+		OpenAIModel:          envOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
+		SystemPrompt:         envOrDefault("WORKER_SYSTEM_PROMPT", "你是 autonous 的执行 Worker。回复简洁、准确；需要时给出可执行步骤。"),
+		DBPath:               envOrDefault("TG_DB_PATH", "/state/agent.db"),
+	}, nil
+}
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envIntOrDefault(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func envBoolOrDefault(key string, fallback bool) bool {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	return v == "1" || strings.EqualFold(v, "true")
+}
