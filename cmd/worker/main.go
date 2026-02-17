@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -519,7 +521,14 @@ type toolProtocol struct {
 
 func parseToolProtocol(content string) (toolProtocol, bool) {
 	var parsed toolProtocol
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &parsed); err == nil {
+		return parsed, true
+	}
+	jsonObj, ok := extractJSONObject(content)
+	if !ok {
+		return toolProtocol{}, false
+	}
+	if err := json.Unmarshal([]byte(jsonObj), &parsed); err != nil {
 		return toolProtocol{}, false
 	}
 	return parsed, true
@@ -572,42 +581,52 @@ func executeToolCalls(database *sql.DB, turnEventID int64, runner *toolpkg.Runne
 	var out strings.Builder
 	for _, c := range calls {
 		toolName := strings.TrimSpace(c.Name)
+		argsText, argsRedacted := redactSecrets(string(c.Arguments))
 		if toolName == "" {
 			toolEventID, _ := db.LogEvent(database, &turnEventID, db.EventToolCallStarted, map[string]any{
 				"tool_name": "",
-				"arguments": truncate(string(c.Arguments), 500),
+				"arguments": truncate(argsText, 500),
 			})
+			errText := "validation: empty tool name"
+			errText, errRedacted := redactSecrets(errText)
 			db.LogEvent(database, &toolEventID, db.EventToolCallFailed, map[string]any{
 				"tool_name":   "",
-				"error":       "validation: empty tool name",
+				"error":       errText,
 				"error_class": "validation",
+				"redacted":    argsRedacted || errRedacted,
 			})
 			out.WriteString("tool=\n")
-			out.WriteString("error:\nvalidation: empty tool name\n")
+			out.WriteString("error:\n" + errText + "\n")
 			continue
 		}
 		toolEventID, _ := db.LogEvent(database, &turnEventID, db.EventToolCallStarted, map[string]any{
 			"tool_name": toolName,
-			"arguments": truncate(string(c.Arguments), 500),
+			"arguments": truncate(argsText, 500),
 		})
 		started := time.Now()
 		res, err := runner.RunOne(context.Background(), toolpkg.Call{
 			Name:      toolName,
 			Arguments: c.Arguments,
 		})
+		stdoutText, stdoutRedacted := redactSecrets(res.Stdout)
+		stderrText, stderrRedacted := redactSecrets(res.Stderr)
 		if err != nil {
+			errText, errRedacted := redactSecrets(err.Error())
+			errClass := classifyToolError(err)
+			redacted := argsRedacted || errRedacted || stdoutRedacted || stderrRedacted
 			db.LogEvent(database, &toolEventID, db.EventToolCallFailed, map[string]any{
 				"tool_name":   toolName,
-				"error":       truncate(err.Error(), 500),
-				"error_class": "tool_exec",
+				"error":       truncate(errText, 500),
+				"error_class": errClass,
+				"redacted":    redacted,
 			})
 			out.WriteString("tool=" + toolName + "\n")
-			out.WriteString("error:\n" + truncate(err.Error(), 2000) + "\n")
-			if strings.TrimSpace(res.Stdout) != "" {
-				out.WriteString("stdout:\n" + res.Stdout + "\n")
+			out.WriteString("error:\n" + truncate(errText, 2000) + "\n")
+			if strings.TrimSpace(stdoutText) != "" {
+				out.WriteString("stdout:\n" + stdoutText + "\n")
 			}
-			if strings.TrimSpace(res.Stderr) != "" {
-				out.WriteString("stderr:\n" + res.Stderr + "\n")
+			if strings.TrimSpace(stderrText) != "" {
+				out.WriteString("stderr:\n" + stderrText + "\n")
 			}
 			continue
 		}
@@ -619,14 +638,107 @@ func executeToolCalls(database *sql.DB, turnEventID int64, runner *toolpkg.Runne
 			"truncated_bytes": res.TruncatedBytes,
 		})
 		out.WriteString("tool=" + toolName + "\n")
-		if strings.TrimSpace(res.Stdout) != "" {
-			out.WriteString("stdout:\n" + res.Stdout + "\n")
+		if strings.TrimSpace(stdoutText) != "" {
+			out.WriteString("stdout:\n" + stdoutText + "\n")
 		}
-		if strings.TrimSpace(res.Stderr) != "" {
-			out.WriteString("stderr:\n" + res.Stderr + "\n")
+		if strings.TrimSpace(stderrText) != "" {
+			out.WriteString("stderr:\n" + stderrText + "\n")
 		}
 	}
 	return out.String()
+}
+
+func classifyToolError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "deadline exceeded"), strings.Contains(msg, "timeout"):
+		return "timeout"
+	case strings.Contains(msg, "outside allowlist"), strings.Contains(msg, "denied by policy"):
+		return "policy"
+	case strings.Contains(msg, "validation"), strings.Contains(msg, "required"), strings.Contains(msg, "invalid"), strings.Contains(msg, "unknown tool"), strings.Contains(msg, "must be"):
+		return "validation"
+	default:
+		return "tool_exec"
+	}
+}
+
+var secretPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bBearer\s+[A-Za-z0-9._\-=/+]+`),
+	regexp.MustCompile(`(?i)\b(sk-[A-Za-z0-9\-_]{8,})\b`),
+	regexp.MustCompile(`(?i)\b([A-Za-z0-9_]*(TOKEN|SECRET|PASSWORD|API_KEY))\b\s*[:=]\s*["']?([^\s"']+)`),
+}
+
+func redactSecrets(text string) (string, bool) {
+	out := text
+	redacted := false
+	for _, p := range secretPatterns {
+		next := p.ReplaceAllStringFunc(out, func(m string) string {
+			redacted = true
+			parts := strings.SplitN(m, "=", 2)
+			if len(parts) == 2 && strings.Contains(m, "=") {
+				return parts[0] + "=***REDACTED***"
+			}
+			if strings.Contains(m, ":") {
+				kv := strings.SplitN(m, ":", 2)
+				return kv[0] + ": ***REDACTED***"
+			}
+			return "***REDACTED***"
+		})
+		out = next
+	}
+	return out, redacted
+}
+
+func extractJSONObject(content string) (string, bool) {
+	s := strings.TrimSpace(content)
+	if s == "" {
+		return "", false
+	}
+	start := strings.Index(s, "{")
+	if start < 0 {
+		return "", false
+	}
+	inString := false
+	escapeNext := false
+	depth := 0
+	for i := start; i < len(s); i++ {
+		ch := s[i]
+		if inString {
+			if escapeNext {
+				escapeNext = false
+				continue
+			}
+			if ch == '\\' {
+				escapeNext = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		if ch == '"' {
+			inString = true
+			continue
+		}
+		if ch == '{' {
+			depth++
+			continue
+		}
+		if ch == '}' {
+			depth--
+			if depth == 0 {
+				return s[start : i+1], true
+			}
+		}
+	}
+	return "", false
 }
 
 // --- DB helper functions ---

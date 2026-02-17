@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -391,3 +393,47 @@ func TestProcessTask_ToolFailureThenRecover(t *testing.T) {
 		t.Fatalf("expected at least 1 tool_call.completed, got %d", completedCnt)
 	}
 }
+
+func TestParseToolProtocol_ExtractsJSONFromMarkdownFence(t *testing.T) {
+	content := "```json\n{\"tool_calls\":[],\"final_answer\":\"ok\"}\n```"
+	got, ok := parseToolProtocol(content)
+	if !ok {
+		t.Fatal("expected parse success")
+	}
+	if got.FinalAnswer != "ok" {
+		t.Fatalf("unexpected final_answer: %q", got.FinalAnswer)
+	}
+}
+
+func TestClassifyToolError(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{err: context.DeadlineExceeded, want: "timeout"},
+		{err: errString("path outside allowlist: /"), want: "policy"},
+		{err: errString("validation: read.limit must be > 0"), want: "validation"},
+		{err: errString("ls execution failed: exit status 2"), want: "tool_exec"},
+	}
+	for _, c := range cases {
+		got := classifyToolError(c.err)
+		if got != c.want {
+			t.Fatalf("classifyToolError(%v)=%s want=%s", c.err, got, c.want)
+		}
+	}
+}
+
+func TestRedactSecrets(t *testing.T) {
+	in := "Authorization: Bearer abc123 TOKEN=xyz sk-test-secret"
+	out, redacted := redactSecrets(in)
+	if !redacted {
+		t.Fatal("expected redacted=true")
+	}
+	if strings.Contains(out, "abc123") || strings.Contains(out, "xyz") || strings.Contains(out, "sk-test-secret") {
+		t.Fatalf("secret leak after redaction: %q", out)
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
