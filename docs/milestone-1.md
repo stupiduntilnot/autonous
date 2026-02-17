@@ -162,3 +162,9 @@ turn.started (id=6) 的子事件:
 
 - [ ] 定义通用 `CompletionResponse` 结构：`Content string`, `InputTokens int`, `OutputTokens int`。
 - [ ] 重构 OpenAI client 返回 `CompletionResponse`，从 `usage` 字段提取 token 数。
+
+## 实施与验收约定
+
+- 实施顺序建议：按本文 1 -> 5 顺序推进，每个任务独立完成并验证，避免跨任务耦合导致回归难定位。
+- 每个任务完成后执行：`go build ./... && go test ./...`。
+- 验收标准：事件模型、状态派生、adapter 返回模型与本文定义保持一致；不引入额外持久化表。

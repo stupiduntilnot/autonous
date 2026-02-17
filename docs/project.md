@@ -62,6 +62,12 @@
 
 *一份用于指导开发辅助 `LLM` 的原则性文档位于 `AGENTS.md`。*
 
+### 3.1. Milestone 文档治理
+
+- 每个里程碑只保留一个权威设计文档：`docs/milestone-N.md`。
+- `docs/milestone-N.md` 必须足够完整，使任意 coding agent 仅通过该文档即可重新实现该 milestone。
+- 不维护并行的 `plan-milestoneN.md` 长期文档；若出现临时计划稿，最终必须合并回 `docs/milestone-N.md` 并删除计划稿，避免双源漂移。
+
 ## 4. 运行模型
 
 Docker 容器是 Agent 的服务器，**只启动一次**，持续运行。容器内是一对 Supervisor + Worker 进程。对 Agent 而言，不存在"宿主机"与"容器"的区别——它只知道自己是一对进程。
