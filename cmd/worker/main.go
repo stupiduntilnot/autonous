@@ -303,12 +303,14 @@ func processTask(
 	}
 	compressed := compressor.Compress(history)
 	messages := assembler.Assemble(cfg.SystemPrompt, compressed, task.Text)
+	toolInstruction := buildToolProtocolInstruction(registry)
+	messages = injectToolInstruction(messages, toolInstruction)
 
 	db.LogEvent(database, &agentEventID, db.EventContextAssembled, map[string]any{
 		"original_count":   len(history),
 		"compressed_count": len(compressed),
 		"max_messages":     cfg.HistoryWindow,
-		"system_tokens":    estimateTokens(cfg.SystemPrompt),
+		"system_tokens":    estimateTokens(cfg.SystemPrompt) + estimateTokens(toolInstruction),
 		"history_tokens":   estimateTokensFromMessages(compressed),
 		"user_tokens":      estimateTokens(task.Text),
 	})
@@ -345,6 +347,9 @@ func processTask(
 
 	finalReply := strings.TrimSpace(resp.Content)
 	toolEnvelope, hasToolProtocol := parseToolProtocol(finalReply)
+	if hasToolProtocol && len(toolEnvelope.ToolCalls) == 0 {
+		finalReply = strings.TrimSpace(toolEnvelope.FinalAnswer)
+	}
 	if hasToolProtocol && len(toolEnvelope.ToolCalls) > 0 {
 		toolResultsText, err := executeToolCalls(database, turnEventID, registry, toolEnvelope.ToolCalls)
 		if err != nil {
@@ -412,6 +417,40 @@ func parseToolProtocol(content string) (toolProtocol, bool) {
 		return toolProtocol{}, false
 	}
 	return parsed, true
+}
+
+func buildToolProtocolInstruction(registry *toolpkg.Registry) string {
+	names := registry.MustList()
+	toolNames := make([]string, 0, len(names))
+	for _, meta := range names {
+		toolNames = append(toolNames, meta.Name)
+	}
+	return "You can use tools in this environment. " +
+		"Available tools: " + strings.Join(toolNames, ", ") + ". " +
+		"Always respond with strict JSON: " +
+		"{\"tool_calls\":[{\"name\":\"...\",\"arguments\":{...}}],\"final_answer\":\"...\"}. " +
+		"If a tool is needed, set final_answer to empty and fill tool_calls. " +
+		"If no tool is needed, set tool_calls to [] and provide final_answer."
+}
+
+func injectToolInstruction(messages []ctxpkg.Message, instruction string) []ctxpkg.Message {
+	if strings.TrimSpace(instruction) == "" {
+		return messages
+	}
+	inst := ctxpkg.Message{Role: "system", Content: instruction}
+	if len(messages) == 0 {
+		return []ctxpkg.Message{inst}
+	}
+	if messages[0].Role == "system" {
+		out := make([]ctxpkg.Message, 0, len(messages)+1)
+		out = append(out, messages[0], inst)
+		out = append(out, messages[1:]...)
+		return out
+	}
+	out := make([]ctxpkg.Message, 0, len(messages)+1)
+	out = append(out, inst)
+	out = append(out, messages...)
+	return out
 }
 
 func executeToolCalls(database *sql.DB, turnEventID int64, registry *toolpkg.Registry, calls []toolCall) (string, error) {

@@ -283,3 +283,34 @@ func TestProcessTask_ToolLoopLS(t *testing.T) {
 		t.Fatalf("expected 1 tool_call.completed, got %d", toolCnt)
 	}
 }
+
+func TestProcessTask_ExtractsFinalAnswerFromJSON(t *testing.T) {
+	database := testWorkerDB(t)
+	commander := &captureCommander{}
+	provider := &seqProvider{
+		resps: []modelpkg.CompletionResponse{
+			{Content: "{\"tool_calls\":[],\"final_answer\":\"direct final\"}", InputTokens: 1, OutputTokens: 1},
+		},
+	}
+	cfg := &config.WorkerConfig{
+		OpenAIModel:   "dummy",
+		SystemPrompt:  "sys",
+		HistoryWindow: 12,
+	}
+	task := &queueTask{ID: 4, ChatID: 1, UpdateID: 4, Text: "hello"}
+	ctxProvider := &ctxpkg.SQLiteProvider{DB: database}
+	ctxCompressor := &ctxpkg.SimpleCompressor{MaxMessages: 12}
+	ctxAssembler := &ctxpkg.StandardAssembler{}
+	policy := control.Policy{MaxTurns: 1, MaxWallTime: 120 * time.Second, MaxTokens: 1000, MaxRetries: 3}
+	agentEventID, err := db.LogEvent(database, nil, db.EventAgentStarted, map[string]any{"task_id": 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := toolpkg.NewRegistry()
+	if err := processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg); err != nil {
+		t.Fatalf("processTask failed: %v", err)
+	}
+	if commander.last != "direct final" {
+		t.Fatalf("expected extracted final answer, got %q", commander.last)
+	}
+}
