@@ -25,32 +25,42 @@ func main() {
 	}
 	defer database.Close()
 
-	if err := db.InitWorkerSchema(database); err != nil {
+	if err := db.InitSchema(database); err != nil {
 		log.Fatalf("[worker] failed to init schema: %v", err)
+	}
+
+	// Log process.started for worker.
+	var parentID *int64
+	if cfg.ParentProcessID > 0 {
+		parentID = &cfg.ParentProcessID
+	}
+	_, err = db.LogEvent(database, parentID, db.EventProcessStarted, map[string]any{
+		"role": "worker",
+		"pid":  os.Getpid(),
+	})
+	if err != nil {
+		log.Printf("[worker] failed to log process.started: %v", err)
 	}
 
 	tgClient := telegram.NewClient(cfg.TelegramAPIBase, time.Duration(cfg.Timeout+20)*time.Second)
 	aiClient := openai.NewClient(cfg.OpenAIAPIKey, cfg.OpenAIChatCompURL, cfg.OpenAIModel, 120*time.Second)
 
-	// Load persisted offset or bootstrap.
-	hadSavedOffset := false
-	if saved, err := loadOffset(database); err == nil && saved != nil {
-		cfg.Offset = *saved
-		hadSavedOffset = true
+	// Derive offset from inbox, or bootstrap on first run.
+	offset, err := db.DeriveOffset(database)
+	if err != nil {
+		log.Fatalf("[worker] failed to derive offset: %v", err)
 	}
 
-	if cfg.DropPending && !hadSavedOffset {
+	if offset == 0 && cfg.DropPending {
 		bootstrapped, err := bootstrapOffset(tgClient, cfg.PendingWindowSeconds, cfg.PendingMaxMessages)
 		if err != nil {
 			log.Printf("[worker] bootstrap offset error: %v", err)
 		} else {
-			cfg.Offset = bootstrapped
+			offset = bootstrapped
 		}
-		saveOffset(database, cfg.Offset)
 	}
 
-	log.Printf("worker running id=%s run_id=%s model=%s pending_window_seconds=%d pending_max_messages=%d had_saved_offset=%v",
-		cfg.WorkerInstanceID, cfg.RunID, cfg.OpenAIModel, cfg.PendingWindowSeconds, cfg.PendingMaxMessages, hadSavedOffset)
+	log.Printf("worker running id=%s model=%s", cfg.WorkerInstanceID, cfg.OpenAIModel)
 
 	var handledCount uint64
 
@@ -60,7 +70,7 @@ func main() {
 			pollTimeout = 0
 		}
 
-		updates, err := tgClient.GetUpdates(cfg.Offset, pollTimeout)
+		updates, err := tgClient.GetUpdates(offset, pollTimeout)
 		if err != nil {
 			log.Printf("getUpdates error: %v", err)
 			time.Sleep(time.Duration(cfg.SleepSeconds) * time.Second)
@@ -68,8 +78,7 @@ func main() {
 		}
 
 		for _, update := range updates {
-			cfg.Offset = update.UpdateID + 1
-			saveOffset(database, cfg.Offset)
+			offset = update.UpdateID + 1
 
 			if update.Message == nil {
 				continue
@@ -83,16 +92,10 @@ func main() {
 			}
 
 			chatID := update.Message.Chat.ID
-			inserted, err := enqueueMessage(database, update.UpdateID, chatID, text, update.Message.Date)
+			_, err := enqueueMessage(database, update.UpdateID, chatID, text, update.Message.Date)
 			if err != nil {
 				log.Printf("enqueue error update_id=%d: %v", update.UpdateID, err)
 				continue
-			}
-			if inserted {
-				if taskID, err := getTaskIDByUpdateID(database, update.UpdateID); err == nil && taskID > 0 {
-					logTaskEvent(database, taskID, chatID, &update.UpdateID, "ingress", "info", &text, nil, cfg.RunID, cfg.WorkerInstanceID)
-					logTaskEvent(database, taskID, chatID, &update.UpdateID, "queued", "ok", nil, nil, cfg.RunID, cfg.WorkerInstanceID)
-				}
 			}
 		}
 
@@ -109,13 +112,23 @@ func main() {
 
 		handledCount++
 		log.Printf("process task_id=%d chat_id=%d text=%s", task.ID, task.ChatID, truncate(task.Text, 200))
-		logTaskEvent(database, task.ID, task.ChatID, &task.UpdateID, "claimed", "ok", nil, nil, cfg.RunID, cfg.WorkerInstanceID)
 
-		processErr := processTask(database, tgClient, aiClient, &cfg, task)
+		// Log agent.started (root of agent execution tree).
+		agentEventID, _ := db.LogEvent(database, nil, db.EventAgentStarted, map[string]any{
+			"chat_id":   task.ChatID,
+			"task_id":   task.ID,
+			"update_id": task.UpdateID,
+			"text":      truncate(task.Text, 1000),
+		})
+
+		processErr := processTask(database, tgClient, aiClient, &cfg, task, agentEventID)
 		if processErr != nil {
 			msg := processErr.Error()
 			markTaskFailed(database, task.ID, msg)
-			logTaskEvent(database, task.ID, task.ChatID, &task.UpdateID, "task_failed", "failed", nil, &msg, cfg.RunID, cfg.WorkerInstanceID)
+			db.LogEvent(database, &agentEventID, db.EventAgentFailed, map[string]any{
+				"task_id": task.ID,
+				"error":   truncate(msg, 1000),
+			})
 			notify := fmt.Sprintf("任务处理失败：%s", truncate(msg, 600))
 			if err := tgClient.SendMessage(task.ChatID, notify); err != nil {
 				log.Printf("task %d failed to notify chat_id=%d: %v", task.ID, task.ChatID, err)
@@ -123,7 +136,9 @@ func main() {
 			log.Printf("task %d failed: %s", task.ID, msg)
 		} else {
 			markTaskDone(database, task.ID)
-			logTaskEvent(database, task.ID, task.ChatID, &task.UpdateID, "task_done", "ok", nil, nil, cfg.RunID, cfg.WorkerInstanceID)
+			db.LogEvent(database, &agentEventID, db.EventAgentCompleted, map[string]any{
+				"task_id": task.ID,
+			})
 		}
 
 		if cfg.SuicideEvery > 0 && handledCount%cfg.SuicideEvery == 0 {
@@ -133,26 +148,40 @@ func main() {
 	}
 }
 
-func processTask(database *sql.DB, tg *telegram.Client, ai *openai.Client, cfg *config.WorkerConfig, task *queueTask) error {
+func processTask(database *sql.DB, tg *telegram.Client, ai *openai.Client, cfg *config.WorkerConfig, task *queueTask, agentEventID int64) error {
 	messages, err := buildMessages(database, cfg.SystemPrompt, task.ChatID, cfg.HistoryWindow, task.Text)
 	if err != nil {
 		return err
 	}
 
-	logTaskEvent(database, task.ID, task.ChatID, &task.UpdateID, "model_request", "info", nil, nil, cfg.RunID, cfg.WorkerInstanceID)
+	// Log turn.started.
+	db.LogEvent(database, &agentEventID, db.EventTurnStarted, map[string]any{
+		"model_name": cfg.OpenAIModel,
+	})
 
+	turnStart := time.Now()
 	reply, err := ai.ChatCompletion(messages)
 	if err != nil {
 		return err
 	}
+	latencyMs := time.Since(turnStart).Milliseconds()
 
-	logTaskEvent(database, task.ID, task.ChatID, &task.UpdateID, "model_response", "ok", &reply, nil, cfg.RunID, cfg.WorkerInstanceID)
+	// Log turn.completed.
+	db.LogEvent(database, &agentEventID, db.EventTurnCompleted, map[string]any{
+		"model_name":   cfg.OpenAIModel,
+		"latency_ms":   latencyMs,
+		"input_tokens":  0, // will be filled in Task 5 (Model Adapter)
+		"output_tokens": 0,
+	})
 
 	if err := tg.SendMessage(task.ChatID, reply); err != nil {
 		return err
 	}
 
-	logTaskEvent(database, task.ID, task.ChatID, &task.UpdateID, "reply_sent", "ok", nil, nil, cfg.RunID, cfg.WorkerInstanceID)
+	// Log reply.sent.
+	db.LogEvent(database, &agentEventID, db.EventReplySent, map[string]any{
+		"chat_id": task.ChatID,
+	})
 
 	appendHistory(database, task.ChatID, "user", task.Text)
 	appendHistory(database, task.ChatID, "assistant", reply)
@@ -168,26 +197,6 @@ type queueTask struct {
 	Text     string
 }
 
-func loadOffset(database *sql.DB) (*int64, error) {
-	var value string
-	err := database.QueryRow("SELECT value FROM kv WHERE key = 'telegram_offset'").Scan(&value)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var offset int64
-	fmt.Sscanf(value, "%d", &offset)
-	return &offset, nil
-}
-
-func saveOffset(database *sql.DB, offset int64) {
-	database.Exec(
-		"INSERT INTO kv (key, value) VALUES ('telegram_offset', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-		fmt.Sprintf("%d", offset),
-	)
-}
 
 func appendHistory(database *sql.DB, chatID int64, role, text string) {
 	database.Exec("INSERT INTO history (chat_id, role, text) VALUES (?, ?, ?)", chatID, role, text)
@@ -242,14 +251,6 @@ func enqueueMessage(database *sql.DB, updateID, chatID int64, text string, messa
 	return affected > 0, nil
 }
 
-func getTaskIDByUpdateID(database *sql.DB, updateID int64) (int64, error) {
-	var id int64
-	err := database.QueryRow("SELECT id FROM inbox WHERE update_id = ?", updateID).Scan(&id)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	return id, err
-}
 
 func hasRunnableTasks(database *sql.DB) bool {
 	var exists int64
@@ -302,24 +303,6 @@ func markTaskFailed(database *sql.DB, taskID int64, errMsg string) {
 		truncate(errMsg, 1000), taskID)
 }
 
-func logTaskEvent(database *sql.DB, taskID, chatID int64, updateID *int64, phase, status string, message, errMsg *string, runID, workerInstanceID string) {
-	var msg, errStr sql.NullString
-	if message != nil {
-		msg = sql.NullString{String: truncate(*message, 1000), Valid: true}
-	}
-	if errMsg != nil {
-		errStr = sql.NullString{String: truncate(*errMsg, 1000), Valid: true}
-	}
-	var uid sql.NullInt64
-	if updateID != nil {
-		uid = sql.NullInt64{Int64: *updateID, Valid: true}
-	}
-	database.Exec(
-		`INSERT INTO task_audit (task_id, chat_id, update_id, phase, status, message, error, run_id, worker_instance_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		taskID, chatID, uid, phase, status, msg, errStr, runID, workerInstanceID,
-	)
-}
 
 func bootstrapOffset(tg *telegram.Client, pendingWindowSeconds int64, pendingMaxMessages int) (int64, error) {
 	updates, err := tg.GetUpdates(0, 0)

@@ -93,6 +93,50 @@ func InitSchema(db *sql.DB) error {
 	return err
 }
 
+// CurrentGoodRev returns the revision from the most recent revision.promoted event,
+// or "" if none found.
+func CurrentGoodRev(database *sql.DB) (string, error) {
+	var payload string
+	err := database.QueryRow(
+		`SELECT payload FROM events WHERE event_type = ? ORDER BY id DESC LIMIT 1`,
+		EventRevisionPromoted,
+	).Scan(&payload)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(payload), &m); err != nil {
+		return "", err
+	}
+	rev, _ := m["revision"].(string)
+	return rev, nil
+}
+
+// NextWorkerSeq returns the next worker sequence number by counting
+// worker.spawned events under the given supervisor event ID.
+func NextWorkerSeq(database *sql.DB, supervisorEventID int64) (int, error) {
+	var count int
+	err := database.QueryRow(
+		`SELECT COUNT(*) FROM events WHERE parent_id = ? AND event_type = ?`,
+		supervisorEventID, EventWorkerSpawned,
+	).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+	return count + 1, nil
+}
+
+// DeriveOffset returns the next Telegram polling offset derived from the inbox table.
+// Returns 0 if inbox is empty.
+func DeriveOffset(database *sql.DB) (int64, error) {
+	var offset int64
+	err := database.QueryRow(`SELECT COALESCE(MAX(update_id) + 1, 0) FROM inbox`).Scan(&offset)
+	return offset, err
+}
+
 // LogEvent inserts an event into the events table and returns its auto-generated id.
 // parentID may be nil for root events. payload is serialized to JSON; nil payload stores NULL.
 func LogEvent(db *sql.DB, parentID *int64, eventType string, payload map[string]any) (int64, error) {

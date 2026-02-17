@@ -21,15 +21,25 @@ func main() {
 	}
 	defer database.Close()
 
-	if err := db.InitSupervisorSchema(database); err != nil {
+	if err := db.InitSchema(database); err != nil {
 		log.Fatalf("[supervisor] failed to init schema: %v", err)
 	}
 
-	// Initialize current_good_rev if not set.
+	// Log process.started for supervisor.
+	supEventID, err := db.LogEvent(database, nil, db.EventProcessStarted, map[string]any{
+		"role":    "supervisor",
+		"pid":     os.Getpid(),
+		"version": gitHeadRev(cfg.WorkspaceDir),
+	})
+	if err != nil {
+		log.Fatalf("[supervisor] failed to log process.started: %v", err)
+	}
+
+	// Initialize current_good_rev if no revision.promoted event exists.
 	if rev := gitHeadRev(cfg.WorkspaceDir); rev != "" {
-		existing, _ := getState(database, "current_good_rev")
+		existing, _ := db.CurrentGoodRev(database)
 		if existing == "" {
-			markGoodRevision(database, rev)
+			db.LogEvent(database, nil, db.EventRevisionPromoted, map[string]any{"revision": rev})
 			log.Printf("[supervisor] initialized current_good_rev=%s", rev)
 		}
 	}
@@ -39,16 +49,20 @@ func main() {
 	log.Printf("[supervisor] running worker=%s", cfg.WorkerBin)
 
 	for {
-		instanceID, err := nextWorkerInstanceID(database)
+		seq, err := db.NextWorkerSeq(database, supEventID)
 		if err != nil {
-			log.Fatalf("[supervisor] failed to get instance id: %v", err)
+			log.Fatalf("[supervisor] failed to get worker seq: %v", err)
 		}
+		instanceID := fmt.Sprintf("W%06d", seq)
 		startedAt := time.Now()
 
 		log.Printf("[supervisor] starting worker instance %s", instanceID)
 
 		cmd := exec.Command(cfg.WorkerBin)
-		cmd.Env = append(os.Environ(), "WORKER_INSTANCE_ID="+instanceID)
+		cmd.Env = append(os.Environ(),
+			"WORKER_INSTANCE_ID="+instanceID,
+			fmt.Sprintf("PARENT_PROCESS_ID=%d", supEventID),
+		)
 		cmd.Stdin = nil
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -57,8 +71,27 @@ func main() {
 			log.Fatalf("[supervisor] failed to start worker binary %s: %v", cfg.WorkerBin, err)
 		}
 
+		// Log worker.spawned.
+		db.LogEvent(database, &supEventID, db.EventWorkerSpawned, map[string]any{
+			"pid": cmd.Process.Pid,
+		})
+
 		err = cmd.Wait()
 		uptime := time.Since(startedAt)
+
+		// Log worker.exited.
+		exitCode := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = -1
+			}
+		}
+		db.LogEvent(database, &supEventID, db.EventWorkerExited, map[string]any{
+			"exit_code":      exitCode,
+			"uptime_seconds": int(uptime.Seconds()),
+		})
 
 		if err == nil {
 			log.Printf("[supervisor] worker %s exited normally; restarting in %ds", instanceID, cfg.RestartDelaySeconds)
@@ -69,14 +102,13 @@ func main() {
 		stableThreshold := time.Duration(cfg.StableRunSeconds) * time.Second
 		if uptime >= stableThreshold {
 			if rev := gitHeadRev(cfg.WorkspaceDir); rev != "" {
-				markGoodRevision(database, rev)
+				db.LogEvent(database, nil, db.EventRevisionPromoted, map[string]any{"revision": rev})
 			}
 			crashTimes = nil
 		} else {
 			now := time.Now()
 			crashTimes = append(crashTimes, now)
 			window := time.Duration(cfg.CrashWindowSeconds) * time.Second
-			// Retain only crashes within the window.
 			filtered := crashTimes[:0]
 			for _, t := range crashTimes {
 				if now.Sub(t) <= window {
@@ -86,9 +118,11 @@ func main() {
 			crashTimes = filtered
 
 			if len(crashTimes) >= cfg.CrashThreshold {
-				reason := fmt.Sprintf("crash_loop threshold=%d window=%ds", cfg.CrashThreshold, cfg.CrashWindowSeconds)
-				setState(database, "last_failure_reason", reason)
-				attemptRollback(&cfg, database)
+				db.LogEvent(database, &supEventID, db.EventCrashLoopDetected, map[string]any{
+					"threshold":      cfg.CrashThreshold,
+					"window_seconds": cfg.CrashWindowSeconds,
+				})
+				attemptRollback(&cfg, database, supEventID)
 				crashTimes = nil
 			}
 		}
@@ -102,12 +136,11 @@ func gitHeadRev(workspaceDir string) string {
 	if err != nil {
 		return ""
 	}
-	rev := strings.TrimSpace(string(out))
-	return rev
+	return strings.TrimSpace(string(out))
 }
 
-func attemptRollback(cfg *config.SupervisorConfig, database *sql.DB) {
-	rev, _ := getState(database, "current_good_rev")
+func attemptRollback(cfg *config.SupervisorConfig, database *sql.DB, supEventID int64) {
+	rev, _ := db.CurrentGoodRev(database)
 	if rev == "" {
 		log.Printf("[supervisor] rollback skipped: no current_good_rev")
 		return
@@ -115,6 +148,10 @@ func attemptRollback(cfg *config.SupervisorConfig, database *sql.DB) {
 
 	if !cfg.AutoRollback {
 		log.Printf("[supervisor] crash threshold reached; auto rollback disabled. target_rev=%s", rev)
+		db.LogEvent(database, &supEventID, db.EventRollbackAttempted, map[string]any{
+			"target_revision": rev,
+			"success":         false,
+		})
 		return
 	}
 
@@ -122,55 +159,28 @@ func attemptRollback(cfg *config.SupervisorConfig, database *sql.DB) {
 
 	gitCmd := exec.Command("git", "-C", cfg.WorkspaceDir, "checkout", rev, "--", ".")
 	if err := gitCmd.Run(); err != nil {
-		setState(database, "last_failure_reason", "rollback_failed_git_checkout")
 		log.Printf("[supervisor] rollback failed: git checkout returned error: %v", err)
+		db.LogEvent(database, &supEventID, db.EventRollbackAttempted, map[string]any{
+			"target_revision": rev,
+			"success":         false,
+		})
 		return
 	}
 
 	buildCmd := exec.Command("go", "build", "-o", cfg.WorkerBin, "./cmd/worker")
 	buildCmd.Dir = cfg.WorkspaceDir
 	if err := buildCmd.Run(); err != nil {
-		setState(database, "last_failure_reason", "rollback_failed_build")
 		log.Printf("[supervisor] rollback failed: worker build returned error: %v", err)
+		db.LogEvent(database, &supEventID, db.EventRollbackAttempted, map[string]any{
+			"target_revision": rev,
+			"success":         false,
+		})
 		return
 	}
 
+	db.LogEvent(database, &supEventID, db.EventRollbackAttempted, map[string]any{
+		"target_revision": rev,
+		"success":         true,
+	})
 	log.Printf("[supervisor] rollback applied and worker rebuilt at rev=%s", rev)
-}
-
-func getState(database *sql.DB, key string) (string, error) {
-	var value string
-	err := database.QueryRow("SELECT value FROM supervisor_state WHERE key = ?", key).Scan(&value)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	return value, err
-}
-
-func setState(database *sql.DB, key, value string) {
-	database.Exec(
-		"INSERT INTO supervisor_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-		key, value,
-	)
-}
-
-func markGoodRevision(database *sql.DB, revision string) {
-	database.Exec(
-		`INSERT INTO supervisor_revisions (revision, build_ok, health_ok, promoted_at)
-		 VALUES (?, 1, 1, unixepoch())
-		 ON CONFLICT(revision) DO UPDATE SET build_ok = 1, health_ok = 1, promoted_at = unixepoch()`,
-		revision,
-	)
-	setState(database, "current_good_rev", revision)
-}
-
-func nextWorkerInstanceID(database *sql.DB) (string, error) {
-	currentStr, _ := getState(database, "worker_instance_seq")
-	current := 0
-	if currentStr != "" {
-		fmt.Sscanf(currentStr, "%d", &current)
-	}
-	next := current + 1
-	setState(database, "worker_instance_seq", fmt.Sprintf("%d", next))
-	return fmt.Sprintf("W%06d", next), nil
 }

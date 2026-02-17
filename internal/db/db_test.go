@@ -122,6 +122,101 @@ func TestLogEvent_WithParent(t *testing.T) {
 	}
 }
 
+func TestCurrentGoodRev(t *testing.T) {
+	db := testDB(t)
+
+	// No events yet -> empty string.
+	rev, err := CurrentGoodRev(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev != "" {
+		t.Errorf("expected empty rev, got %q", rev)
+	}
+
+	// Insert a revision.promoted event.
+	_, err = LogEvent(db, nil, EventRevisionPromoted, map[string]any{"revision": "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err = CurrentGoodRev(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev != "abc123" {
+		t.Errorf("expected abc123, got %q", rev)
+	}
+
+	// Insert a newer one -> should return the latest.
+	_, err = LogEvent(db, nil, EventRevisionPromoted, map[string]any{"revision": "def456"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err = CurrentGoodRev(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rev != "def456" {
+		t.Errorf("expected def456, got %q", rev)
+	}
+}
+
+func TestNextWorkerSeq(t *testing.T) {
+	db := testDB(t)
+
+	supID, err := LogEvent(db, nil, EventProcessStarted, map[string]any{"role": "supervisor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No workers spawned yet -> seq=1.
+	seq, err := NextWorkerSeq(db, supID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 1 {
+		t.Errorf("expected 1, got %d", seq)
+	}
+
+	// Spawn a worker -> seq=2.
+	_, err = LogEvent(db, &supID, EventWorkerSpawned, map[string]any{"pid": 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq, err = NextWorkerSeq(db, supID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 2 {
+		t.Errorf("expected 2, got %d", seq)
+	}
+}
+
+func TestDeriveOffset(t *testing.T) {
+	db := testDB(t)
+
+	// Empty inbox -> 0.
+	offset, err := DeriveOffset(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offset != 0 {
+		t.Errorf("expected 0, got %d", offset)
+	}
+
+	// Insert inbox rows.
+	db.Exec(`INSERT INTO inbox (update_id, chat_id, text, message_date) VALUES (100, 1, 'a', 0)`)
+	db.Exec(`INSERT INTO inbox (update_id, chat_id, text, message_date) VALUES (200, 1, 'b', 0)`)
+
+	offset, err = DeriveOffset(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offset != 201 {
+		t.Errorf("expected 201, got %d", offset)
+	}
+}
+
 func TestLogEvent_NilPayload(t *testing.T) {
 	db := testDB(t)
 

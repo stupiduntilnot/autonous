@@ -5,7 +5,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // SupervisorConfig holds configuration for the supervisor process.
@@ -36,22 +35,21 @@ func LoadSupervisorConfig() SupervisorConfig {
 
 // WorkerConfig holds configuration for the worker process.
 type WorkerConfig struct {
-	TelegramAPIBase       string
-	Offset                int64
-	Timeout               int
-	SleepSeconds          int
-	DropPending           bool
-	PendingWindowSeconds  int64
-	PendingMaxMessages    int
-	HistoryWindow         int
-	WorkerInstanceID      string
-	RunID                 string
-	SuicideEvery          uint64
-	OpenAIAPIKey          string
-	OpenAIChatCompURL     string
-	OpenAIModel           string
-	SystemPrompt          string
-	DBPath                string
+	TelegramAPIBase      string
+	Timeout              int
+	SleepSeconds         int
+	DropPending          bool
+	PendingWindowSeconds int64
+	PendingMaxMessages   int
+	HistoryWindow        int
+	WorkerInstanceID     string
+	ParentProcessID      int64
+	SuicideEvery         uint64
+	OpenAIAPIKey         string
+	OpenAIChatCompURL    string
+	OpenAIModel          string
+	SystemPrompt         string
+	DBPath               string
 }
 
 // LoadWorkerConfig reads worker configuration from environment variables.
@@ -66,11 +64,10 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 	}
 
 	workerInstanceID := envOrDefault("WORKER_INSTANCE_ID", "W000000")
-	runID := fmt.Sprintf("R%d-%d-%s", time.Now().Unix(), os.Getpid(), workerInstanceID)
+	parentProcessID := int64(envIntOrDefault("PARENT_PROCESS_ID", 0))
 
 	return WorkerConfig{
 		TelegramAPIBase:      fmt.Sprintf("https://api.telegram.org/bot%s", telegramToken),
-		Offset:               int64(envIntOrDefault("TG_OFFSET_START", 0)),
 		Timeout:              envIntOrDefault("TG_TIMEOUT", 30),
 		SleepSeconds:         envIntOrDefault("TG_SLEEP_SECONDS", 1),
 		DropPending:          envBoolOrDefault("TG_DROP_PENDING", true),
@@ -78,7 +75,7 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		PendingMaxMessages:   envIntOrDefault("TG_PENDING_MAX_MESSAGES", 50),
 		HistoryWindow:        envIntOrDefault("TG_HISTORY_WINDOW", 12),
 		WorkerInstanceID:     workerInstanceID,
-		RunID:                runID,
+		ParentProcessID:      parentProcessID,
 		SuicideEvery:         uint64(envIntOrDefault("WORKER_SUICIDE_EVERY", 0)),
 		OpenAIAPIKey:         openaiKey,
 		OpenAIChatCompURL:    envOrDefault("OPENAI_CHAT_COMPLETIONS_URL", "https://api.openai.com/v1/chat/completions"),
