@@ -99,6 +99,8 @@ Achieve safe self-updates.
 - Artifact management: store build artifacts + metadata (SHA, build time, tests passed)
 - Rollback: supervisor keeps last-known-good worker (N-1) and auto-reverts on failure
 
+详细设计见 [milestone-5.md](./milestone-5.md)。
+
 ---
 
 ## TODO
@@ -126,3 +128,5 @@ Achieve safe self-updates.
   - 引入 `risk_tier` 分层策略（Read/Write/Exec/Network）并接入审计与策略控制
 - Tool reliability 后续能力：
   - 引入 dead-letter 机制（达到重试上限后进入隔离队列并支持人工/自动重放）
+- Tool native implementation
+  - 有些tool用Golang原生实现比调用cli工具好。应该替换现在的实现。
