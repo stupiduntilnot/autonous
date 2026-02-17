@@ -46,10 +46,10 @@ A minimal context subsystem MVP but with proper interfaces abstraction.
 
 ### Deliverables
 - Three independent interfaces: ContextProvider, ContextCompressor, PromptAssembler
-- Token budget driven compression (chars/4 estimation, aligned with pi-mono)
+- Provider-agnostic `context.Message` type (不依赖任何 LLM provider 类型)
 - Naive implementations:
   - provider: select recent N messages from SQLite
-  - compressor: token budget trim + per-message character truncation
+  - compressor: max N messages
   - assembler: system + history + user message
 - Compression events logged to `events` table for observability
 
@@ -87,3 +87,16 @@ Achieve safe self-updates.
 - Upgrade pipeline: generate patch -> build -> test/self-check -> stage artifact -> approve -> deploy
 - Artifact management: store build artifacts + metadata (SHA, build time, tests passed)
 - Rollback: supervisor keeps last-known-good worker (N-1) and auto-reverts on failure
+
+---
+
+## TODO
+
+待所有已定义 milestone 完成后，整理为新的 milestone：
+
+- 单条消息字符截断：`Compressor` 对超长单条消息截断
+- Token 预算压缩：`Compressor` 基于 `chars/4` 估算做 token 级裁剪
+- LLM 摘要压缩：`Compressor` 调用 LLM 对旧消息生成摘要
+- Tool output 处理：`Compressor` 识别 tool call 结果并单独截断/跳过
+- 多 provider 支持：各 LLM provider 实现自己的 adapter
+- 语义检索：Provider 基于向量相似度检索相关历史，而非简单时间窗口

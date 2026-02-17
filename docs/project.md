@@ -1,6 +1,6 @@
 # Autonous 项目文档
 
-最后更新: 2026-02-16
+最后更新: 2026-02-17
 
 ## 1. 项目定位
 `autonous` 是一个通过 `Telegram` 远程驱动的自主编程系统（autonomous coding system），目前正在用 `Golang` 进行重写。
@@ -28,6 +28,28 @@
 - **统一事件日志 (Unified Event Log)**: 所有用于审计、调试和追踪的事件都将被记录在一个统一的 `events` 表中。
 - **层级化运行 ID (Hierarchical Run IDs)**: 使用一个通用的 `parent_run_id` 关系来为进程层级建模，从而实现因果链的追踪。
 - **事件命名约定 (Event Naming)**: 事件类型使用点 (`.`) 来为命名空间分层（例如, `llm_call.started`）。
+
+### 2.5. Adapter 边界
+- 所有 LLM provider 特定的类型、协议和行为必须封装在各自的 adapter 内部。
+- 系统的其余部分（`worker`、`context` 层等）只使用通用抽象类型（如 `context.Message`、`CompletionResponse`），不直接依赖任何 provider 的类型。
+- 每个 adapter 负责：通用类型到 provider 请求格式的转换、provider 响应到通用类型的转换、provider 特定的错误处理和重试逻辑。
+- 新增 LLM provider 时，只需新增一个 adapter，不应修改 `context` 层或 `worker` 的代码。
+
+### 2.6. 分层 Package 设计
+参考 pi-mono 的分层架构，系统按职责分为独立的层级，每层可独立使用：
+
+| 层级 | 职责 | 独立性 |
+|---|---|---|
+| `ai` | LLM 通信：adapter、通用消息类型、`CompletionResponse` | 可独立使用，不依赖 agent 或上层逻辑 |
+| `agent` | Agent 循环：context 管理、turn 执行、事件记录 | 依赖 `ai`，可独立启动一个 agent loop |
+| `coding-agent` | 领域特定：tool 子系统、代码操作、自我更新 | 依赖 `ai` + `agent` |
+
+各 milestone 与层级的对应关系：
+- `ai` 层: Milestone 0 (OpenAI adapter)、Milestone 2 (context 通用消息类型)
+- `agent` 层: Milestone 1 (可观测性)、Milestone 2 (context 管理)、Milestone 3 (控制平面)
+- `coding-agent` 层: Milestone 4 (tool 子系统)、Milestone 5 (自我更新)
+
+上层依赖下层，下层不感知上层的存在。每层定义自己的接口，通过依赖注入组合。
 
 ## 3. 设计文档
 本文档提供一个宏观的概览。关于具体的实现计划，请参考各个 `milestone` 的文档：

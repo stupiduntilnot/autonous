@@ -11,7 +11,7 @@
 ## 行为准则
 
 1.  **严格遵守项目文档**:
-    - `docs/PROJECT.md`, `docs/milestone-0.md` 和 `docs/milestone-1.md` 中包含的设计和计划是事实的唯一来源。
+    - `docs/project.md` 和 `docs/milestone-*.md` 中包含的设计和计划是事实的唯一来源。
     - 在没有首先讨论权衡并获得明确批准之前，不要偏离这些计划或引入新的架构模式。
 
 2.  **先理解，后行动**:

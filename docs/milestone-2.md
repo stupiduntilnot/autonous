@@ -36,11 +36,11 @@ type Message struct {
 }
 ```
 
-各 LLM Adapter 负责双向转换：
-- `context.Message` -> `openai.Message`（发送给 LLM 时）
-- LLM response -> `context.Message`（存入 history 时）
+各 LLM Adapter 在内部完成双向转换：
+- `context.Message` -> provider 特定格式（在 `ChatCompletion` 方法内部，调用者不感知）
+- LLM response -> `CompletionResponse`（已有通用返回类型）
 
-当前只有 OpenAI adapter，转换是 trivial 的（字段名相同）。但当引入 Anthropic、Gemini 等 provider 时，各自的消息格式差异由 adapter 封装，context 层不受影响。
+当前只有 OpenAI adapter，转换是 trivial 的（字段名相同）。但当引入 Anthropic、Gemini 等 provider 时，各自的消息格式差异由 adapter 内部封装，worker 和 context 层不受影响。
 
 ## 接口设计
 
@@ -136,23 +136,26 @@ messages, err := buildMessages(database, cfg.SystemPrompt, task.ChatID, cfg.Hist
 history, err := provider.GetHistory(task.ChatID, cfg.HistoryWindow)
 compressed := compressor.Compress(history)
 ctxMessages := assembler.Assemble(cfg.SystemPrompt, compressed, task.Text)
-// Convert context.Message -> openai.Message before LLM call
-llmMessages := toOpenAIMessages(ctxMessages)
+resp, err := ai.ChatCompletion(ctxMessages)
 ```
 
 三个组件在 worker 启动时初始化，通过参数传入 `processTask`。
 
-`toOpenAIMessages` 是一个简单的转换函数，将 `context.Message` 映射到 `openai.Message`。未来引入其他 provider 时，各 adapter 提供自己的转换。
+`context.Message` -> `openai.Message` 的转换由 OpenAI adapter 内部完成：`ChatCompletion` 接受 `[]context.Message`，在方法内部转换为 `openai` 的请求格式。Worker 全程只使用 `context.Message`，不接触任何 provider 特定类型。未来引入其他 LLM provider 时，各 adapter 同样在内部完成转换。
 
 ## 压缩事件
 
-压缩行为记录到 `events` 表：
+context 组装结果记录到 `events` 表：
 
 | event_type | 层级 | payload |
 |---|---|---|
-| `context.compressed` | Turn | `original_count`, `compressed_count`, `max_messages` |
+| `context.assembled` | Turn | `original_count`, `compressed_count`, `max_messages`, `system_tokens`, `history_tokens`, `user_tokens` |
 
-仅在实际发生裁剪时记录（`compressed_count < original_count`）。在 `turn.started` 之后、LLM 调用之前记录，挂在 agent event 下。
+每次 LLM 调用前都记录，挂在 agent event 下。payload 包含：
+- `original_count` / `compressed_count` / `max_messages`：消息裁剪情况
+- `system_tokens` / `history_tokens` / `user_tokens`：各组件的估算 token 数
+
+Token 估算使用 `ceil(chars / 4)` 启发式方法（与 pi-mono 的 `estimateTokens` 一致）。LLM API 只返回聚合的 `prompt_tokens`，不提供 system/history/user 的分项，因此本地估算是获取分项 token 成本的唯一途径。
 
 ## 配置
 
@@ -179,17 +182,8 @@ llmMessages := toOpenAIMessages(ctxMessages)
 
 ### 4. Worker 集成
 
-- [ ] 添加 `toOpenAIMessages` 转换函数。
+- [ ] 修改 `openai.ChatCompletion` 接受 `[]context.Message`，内部转换为 `openai.Message`。
 - [ ] 在 `cmd/worker/main.go` 中初始化三个组件。
 - [ ] 替换 `buildMessages` 为 provider -> compressor -> assembler 流水线。
 - [ ] 删除 `recentHistory`、`buildMessages` 旧函数。
-- [ ] 添加 `context.compressed` 事件记录。
-
-## 未来演进（不在 MVP 范围内）
-
-- **单条消息字符截断**: `Compressor` 对超长单条消息截断。
-- **Token 预算压缩**: `Compressor` 基于 `chars/4` 估算做 token 级裁剪，与 pi-mono 的 `findCutPoint` 对齐。
-- **LLM 摘要压缩**: `Compressor` 实现可调用 LLM 对旧消息生成摘要，与 pi-mono 的 `compaction` 对齐。
-- **Tool output 处理** (Milestone 4): `Compressor` 识别 tool call 结果并单独截断/跳过。
-- **多 provider 支持**: 各 LLM provider 实现自己的 `context.Message` <-> provider message 转换。
-- **语义检索**: Provider 实现可基于向量相似度检索相关历史，而非简单时间窗口。
+- [ ] 添加 `context.assembled` 事件记录（含各组件字符数）。
