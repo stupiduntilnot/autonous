@@ -19,23 +19,23 @@ Implement a minimal MVP: supervisor + worker + telegram + OpenAI API
   - [DONE] Secrets (e.g. API tokens) must be injected via ENVIRONMENT VARIABLES
   - [DONE] During development, secrets should be injected into Docker container instead of hard-coded in Dockerfile or any startup script.
 
-## Milestone 1 — Observability
+## [DONE] Milestone 1 — Observability
 
 ### Goal
 Ensure every run is traceable, reviewable, and explainable.
 
 ### Deliverables
-- Unified event log (`events` table):
-  - Flat storage with hierarchical reconstruction via `parent_id`
-  - Infrastructure events: process lifecycle, worker spawn/exit, crash loop, rollback
-  - Agent execution events (3-layer model aligned with pi-mono): Agent -> Turn -> ToolCall
-- Model Adapter interface:
-  - Common `CompletionResponse` with `input_tokens`, `output_tokens`
-  - Token usage extracted from provider API response (not tokenizer)
-- State derivation from existing data:
-  - `telegram_offset` from `inbox` table
-  - `current_good_rev` from `revision.promoted` event
-  - `worker_instance_seq` from `worker.spawned` event count
+- [DONE] Unified event log (`events` table):
+  - [DONE] Flat storage with hierarchical reconstruction via `parent_id`
+  - [DONE] Infrastructure events: process lifecycle, worker spawn/exit, crash loop, rollback
+  - [DONE] Agent execution events (3-layer model aligned with pi-mono): Agent -> Turn -> ToolCall
+- [DONE] Model Adapter interface:
+  - [DONE] Common `CompletionResponse` with `input_tokens`, `output_tokens`
+  - [DONE] Token usage extracted from provider API response (not tokenizer)
+- [DONE] State derivation from existing data:
+  - [DONE] `telegram_offset` from `inbox` table
+  - [DONE] `current_good_rev` from `revision.promoted` event
+  - [DONE] `worker_instance_seq` from `worker.spawned` event count
 
 详细设计见 [milestone-1.md](./milestone-1.md)。
 
@@ -45,14 +45,15 @@ Ensure every run is traceable, reviewable, and explainable.
 A minimal context subsystem MVP but with proper interfaces abstraction.
 
 ### Deliverables
-- A plugable Context subsystem framework (three independent interfaces):
-  - context provider
-  - context compressor
-  - prompt assembler
-- A naive implementation:
+- Three independent interfaces: ContextProvider, ContextCompressor, PromptAssembler
+- Token budget driven compression (chars/4 estimation, aligned with pi-mono)
+- Naive implementations:
   - provider: select recent N messages from SQLite
-  - compressor: max N messages; max string characters trim; tool output (skip + truncate)
-  - assembler: system + recent history + user message
+  - compressor: token budget trim + per-message character truncation
+  - assembler: system + history + user message
+- Compression events logged to `events` table for observability
+
+详细设计见 [milestone-2.md](./milestone-2.md)。
 
 ## Milestone 3 — Basic Control Plane
 
