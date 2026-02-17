@@ -160,7 +160,7 @@ func processTask(database *sql.DB, tg *telegram.Client, ai *openai.Client, cfg *
 	})
 
 	turnStart := time.Now()
-	reply, err := ai.ChatCompletion(messages)
+	resp, err := ai.ChatCompletion(messages)
 	if err != nil {
 		return err
 	}
@@ -168,13 +168,13 @@ func processTask(database *sql.DB, tg *telegram.Client, ai *openai.Client, cfg *
 
 	// Log turn.completed.
 	db.LogEvent(database, &agentEventID, db.EventTurnCompleted, map[string]any{
-		"model_name":   cfg.OpenAIModel,
-		"latency_ms":   latencyMs,
-		"input_tokens":  0, // will be filled in Task 5 (Model Adapter)
-		"output_tokens": 0,
+		"model_name":    cfg.OpenAIModel,
+		"latency_ms":    latencyMs,
+		"input_tokens":  resp.InputTokens,
+		"output_tokens": resp.OutputTokens,
 	})
 
-	if err := tg.SendMessage(task.ChatID, reply); err != nil {
+	if err := tg.SendMessage(task.ChatID, resp.Content); err != nil {
 		return err
 	}
 
@@ -184,7 +184,7 @@ func processTask(database *sql.DB, tg *telegram.Client, ai *openai.Client, cfg *
 	})
 
 	appendHistory(database, task.ChatID, "user", task.Text)
-	appendHistory(database, task.ChatID, "assistant", reply)
+	appendHistory(database, task.ChatID, "assistant", resp.Content)
 	return nil
 }
 

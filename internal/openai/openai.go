@@ -36,6 +36,13 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+// CompletionResponse is the common response model for all model adapters.
+type CompletionResponse struct {
+	Content      string
+	InputTokens  int
+	OutputTokens int
+}
+
 type chatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
@@ -48,10 +55,16 @@ type chatResponse struct {
 			Content string `json:"content"`
 		} `json:"message"`
 	} `json:"choices"`
+	Usage *usage `json:"usage"`
 }
 
-// ChatCompletion sends a chat completion request and returns the assistant reply.
-func (c *Client) ChatCompletion(messages []Message) (string, error) {
+type usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+}
+
+// ChatCompletion sends a chat completion request and returns a CompletionResponse.
+func (c *Client) ChatCompletion(messages []Message) (CompletionResponse, error) {
 	reqBody := chatRequest{
 		Model:       c.model,
 		Messages:    messages,
@@ -59,46 +72,57 @@ func (c *Client) ChatCompletion(messages []Message) (string, error) {
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal openai request: %w", err)
+		return CompletionResponse{}, fmt.Errorf("failed to marshal openai request: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("failed to create openai request: %w", err)
+		return CompletionResponse{}, fmt.Errorf("failed to create openai request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("openai request failed: %w", err)
+		return CompletionResponse{}, fmt.Errorf("openai request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("failed reading openai response: %w", err)
+		return CompletionResponse{}, fmt.Errorf("failed reading openai response: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		truncated := truncate(string(body), 400)
-		return "", fmt.Errorf("openai non-success status=%d body=%s", resp.StatusCode, truncated)
+		return CompletionResponse{}, fmt.Errorf("openai non-success status=%d body=%s", resp.StatusCode, truncated)
 	}
 
 	var parsed chatResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		truncated := truncate(string(body), 400)
-		return "", fmt.Errorf("failed to parse openai response: %s", truncated)
+		return CompletionResponse{}, fmt.Errorf("failed to parse openai response: %s", truncated)
+	}
+
+	result := CompletionResponse{}
+
+	// Extract token usage.
+	if parsed.Usage != nil {
+		result.InputTokens = parsed.Usage.PromptTokens
+		result.OutputTokens = parsed.Usage.CompletionTokens
 	}
 
 	if len(parsed.Choices) == 0 {
-		return "(empty model response)", nil
+		result.Content = "(empty model response)"
+		return result, nil
 	}
 	content := strings.TrimSpace(parsed.Choices[0].Message.Content)
 	if content == "" {
-		return "(empty model response)", nil
+		result.Content = "(empty model response)"
+		return result, nil
 	}
-	return content, nil
+	result.Content = content
+	return result, nil
 }
 
 func truncate(s string, maxChars int) string {
