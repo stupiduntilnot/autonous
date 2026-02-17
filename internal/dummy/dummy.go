@@ -1,6 +1,7 @@
 package dummy
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
@@ -42,6 +43,10 @@ func parseScript(script string) ([]action, error) {
 		}
 		if strings.HasPrefix(token, "msg:") {
 			actions = append(actions, action{kind: "msg", arg: strings.TrimPrefix(token, "msg:")})
+			continue
+		}
+		if strings.HasPrefix(token, "msgb64:") {
+			actions = append(actions, action{kind: "msgb64", arg: strings.TrimPrefix(token, "msgb64:")})
 			continue
 		}
 		return nil, fmt.Errorf("invalid dummy action: %s", token)
@@ -125,6 +130,23 @@ func (c *Commander) GetUpdates(offset int64, timeout int) ([]cmdpkg.Update, erro
 				},
 			},
 		}, nil
+	case "msgb64":
+		raw, err := base64.StdEncoding.DecodeString(a.arg)
+		if err != nil {
+			return nil, fmt.Errorf("dummy commander msgb64 decode failed: %w", err)
+		}
+		msg := string(raw)
+		c.updateID++
+		return []cmdpkg.Update{
+			{
+				UpdateID: c.updateID,
+				Message: &cmdpkg.Message{
+					Chat: cmdpkg.Chat{ID: 1},
+					Text: &msg,
+					Date: time.Now().Unix(),
+				},
+			},
+		}, nil
 	default:
 		return nil, nil
 	}
@@ -191,6 +213,16 @@ func (p *Provider) ChatCompletion(messages []ctxpkg.Message) (modelpkg.Completio
 	case "msg":
 		return modelpkg.CompletionResponse{
 			Content:      a.arg,
+			InputTokens:  1,
+			OutputTokens: 1,
+		}, nil
+	case "msgb64":
+		raw, err := base64.StdEncoding.DecodeString(a.arg)
+		if err != nil {
+			return modelpkg.CompletionResponse{}, fmt.Errorf("dummy provider msgb64 decode failed: %w", err)
+		}
+		return modelpkg.CompletionResponse{
+			Content:      string(raw),
 			InputTokens:  1,
 			OutputTokens: 1,
 		}, nil

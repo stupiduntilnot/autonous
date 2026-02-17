@@ -49,3 +49,17 @@ func TestCommander_MsgAction(t *testing.T) {
 		t.Fatalf("expected test-msg, got %q", *updates[0].Message.Text)
 	}
 }
+
+func TestProvider_MsgB64Action(t *testing.T) {
+	p, err := NewProvider("x", "msgb64:aGVsbG8=") // "hello"
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := p.ChatCompletion([]ctxpkg.Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Content != "hello" {
+		t.Fatalf("expected hello, got %q", resp.Content)
+	}
+}

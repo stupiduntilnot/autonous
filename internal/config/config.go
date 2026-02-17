@@ -50,6 +50,7 @@ type WorkerConfig struct {
 	OpenAIModel               string
 	SystemPrompt              string
 	DBPath                    string
+	WorkspaceDir              string
 	ModelProvider             string
 	Commander                 string
 	DummyProviderScript       string
@@ -98,6 +99,7 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		OpenAIModel:               envOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
 		SystemPrompt:              envOrDefault("WORKER_SYSTEM_PROMPT", "你是 autonous 的执行 Worker。回复简洁、准确；需要时给出可执行步骤。"),
 		DBPath:                    envOrDefault("AUTONOUS_DB_PATH", "/state/agent.db"),
+		WorkspaceDir:              envOrDefault("WORKSPACE_DIR", "/workspace"),
 		ModelProvider:             modelProvider,
 		Commander:                 commander,
 		DummyProviderScript:       envOrDefault("AUTONOUS_DUMMY_PROVIDER_SCRIPT", "ok"),

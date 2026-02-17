@@ -81,7 +81,7 @@ func main() {
 	registry := toolpkg.NewRegistry()
 	if err := registry.Register(toolpkg.NewLS(
 		toolPolicy,
-		"/workspace",
+		cfg.WorkspaceDir,
 		time.Duration(cfg.ToolTimeoutSeconds)*time.Second,
 		toolpkg.Limits{MaxLines: cfg.ToolMaxOutputLines, MaxBytes: cfg.ToolMaxOutputBytes},
 	)); err != nil {
