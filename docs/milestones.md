@@ -55,22 +55,26 @@ A minimal context subsystem MVP but with proper interfaces abstraction.
 
 详细设计见 [milestone-2.md](./milestone-2.md)。
 
-## Milestone 3 — Basic Control Plane
+## [IN PROGRESS] Milestone 3 — Basic Control Plane
 
 ### Goal
 Prevent runaways, budget overruns, and infinite loops.
 
 ### Deliverables
-- Run limits: `max_turns`, `max_wall_time`, `max_tokens` or `max_cost`
-- Error policy: bounded retries with exponential backoff; circuit breaker (same error N times -> stop)
-- Progress checks: "no-progress" detection (K iterations without state change -> stop)
-- Instruction source abstraction: `Commander` interface（本 milestone 仅实现 Telegram）
-- Model provider abstraction: `ModelProvider` interface（本 milestone 仅实现 OpenAI）
-- Failure-injectable dummies for testing:
-  - `DummyCommander`（测试用）
-  - `DummyProvider`（测试用）
-- 运行时选择策略：使用同一 binary，通过环境变量切换实现（`AUTONOUS_MODEL_PROVIDER=openai|dummy`，`AUTONOUS_COMMANDER=telegram|dummy`）。
-- 可观测性要求：启动时必须将当前 `provider/source` 写入 `events`（记录在 worker 的 `process.started` payload）。
+- [DONE] Run limits: `max_turns`, `max_wall_time`, `max_tokens`（当前 `max_tokens` 使用内置默认值）
+- [DONE] Error policy: bounded retries + exponential backoff + circuit breaker
+- [DONE] Progress checks: no-progress detection + `progress.stalled` event
+- [DONE] Instruction source abstraction: `Commander`（`telegram` + `dummy`）
+- [DONE] Model provider abstraction: `ModelProvider`（`openai` + `dummy`）
+- [DONE] 同一 binary 运行时选择：`AUTONOUS_MODEL_PROVIDER` / `AUTONOUS_COMMANDER`
+- [DONE] 可观测性：worker `process.started` payload 记录 `provider/source`
+- [DONE] Failure-injection tests:
+  - [DONE] unit/integration tests（`internal/control` + `cmd/worker`）
+  - [DONE] dummy E2E script（`scripts/e2e_m3_dummy.sh`）
+
+### Remaining Gaps
+- `max_tokens`、circuit 阈值/冷却、no-progress `K` 仍是内置值，尚未开放 ENV 配置。
+- 处理流程仍是单轮 turn 主路径；多轮 agent loop 的 `max_turns` 语义要在后续 milestone（tool loop）继续验证。
 
 详细设计见 [milestone-3.md](./milestone-3.md)。
 

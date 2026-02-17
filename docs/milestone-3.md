@@ -1,5 +1,31 @@
 # Milestone 3 计划: Basic Control Plane
 
+## 当前实现状态（2026-02-17）
+
+### 已完成
+
+- Run limits：`max_turns`、`max_wall_time`、`max_tokens`（`max_tokens` 当前为内置默认值）
+- Error policy：bounded retries + exponential backoff + circuit breaker
+- Progress checks：`no-progress` 检测与 `progress.stalled` 事件
+- 抽象边界：
+  - `Commander`：`telegram` + `dummy`
+  - `ModelProvider`：`openai` + `dummy`
+- 同一 binary 运行时选择：
+  - `AUTONOUS_MODEL_PROVIDER=openai|dummy`
+  - `AUTONOUS_COMMANDER=telegram|dummy`
+- 可观测性：
+  - worker `process.started` payload 记录 `provider/source`
+  - 关键控制事件已落库：`control.limit_reached`、`retry.*`、`circuit.*`、`progress.stalled`
+- 测试：
+  - `internal/control` 单元测试（含 circuit 状态转换）
+  - `cmd/worker` 集成测试（limit/retry/no-progress）
+  - `scripts/e2e_m3_dummy.sh` 覆盖 failure injection 场景
+
+### 剩余 Gap
+
+- `max_tokens`、`circuit_threshold/cooldown`、`no_progress_k` 仍为内置值，暂未开放 ENV 配置。
+- 当前仍以单轮 turn 为主路径；多轮 loop 下的 `max_turns` 行为需在后续 milestone 持续验证。
+
 ## 核心目标
 
 在不引入复杂编排系统的前提下，为 Agent 增加最小可用的控制平面能力，避免：
@@ -278,34 +304,36 @@ worker := NewWorker(WorkerDeps{
 
 ### 1. 控制策略与数据结构
 
-- [ ] 新建 `internal/control/` 包，定义 `Policy`、`Budget`、`Controller`、`CircuitBreaker`。
-- [ ] 实现 limit/backoff/no-progress 的纯逻辑函数。
+- [DONE] 新建 `internal/control/` 包，提供 `Policy`、`CircuitBreaker` 等控制原语。
+- [DONE] 实现 limit/backoff/no-progress 的纯逻辑函数。
 
 ### 2. 抽象与适配器
 
-- [ ] 定义 `Commander` 接口，并让现有 Telegram client 实现该接口（或新增轻量 adapter）。
-- [ ] 定义 `ModelProvider` 接口，并让现有 OpenAI client 实现该接口。
-- [ ] 提供 `DummyCommander`（failure injectable）用于测试。
-- [ ] 提供 `DummyProvider`（failure injectable）用于测试。
-- [ ] 使用同一 binary，按 `AUTONOUS_MODEL_PROVIDER/AUTONOUS_COMMANDER` 在运行时选择实现。
+- [DONE] 定义 `Commander` 接口，并让 Telegram 实现该接口。
+- [DONE] 定义 `ModelProvider` 接口，并让 OpenAI 实现该接口。
+- [DONE] 提供 `DummyCommander`（failure injectable）用于测试。
+- [DONE] 提供 `DummyProvider`（failure injectable）用于测试。
+- [DONE] 使用同一 binary，按 `AUTONOUS_MODEL_PROVIDER/AUTONOUS_COMMANDER` 在运行时选择实现。
 
 ### 3. Worker 集成
 
-- [ ] 在 `cmd/worker/main.go` 注入 `Controller` + `Commander` + `ModelProvider`。
-- [ ] 在 `processTask` 加入 run limits 检查与 no-progress 检测。
-- [ ] 调整 `claimNextTask` 支持 failed task backoff 过滤。
+- [DONE] 在 `cmd/worker/main.go` 注入控制策略 + `Commander` + `ModelProvider`。
+- [DONE] 在 `processTask` 加入 run limits 检查与 no-progress 检测。
+- [DONE] 调整 `claimNextTask` 支持 failed task backoff 过滤。
 
 ### 4. 事件与可观测性
 
-- [ ] 在 `internal/db/db.go` 增加新增事件常量。
-- [ ] 在关键路径写入 `control.limit_reached`、`retry.scheduled`、`retry.exhausted`、`circuit.*`、`progress.stalled`。
-- [ ] 在 worker 的 `process.started` payload 中记录当前 `provider/source`。
+- [DONE] 在 `internal/db/db.go` 增加新增事件常量。
+- [DONE] 在关键路径写入 `control.limit_reached`、`retry.scheduled`、`retry.exhausted`、`circuit.*`、`progress.stalled`。
+- [DONE] 在 worker 的 `process.started` payload 中记录当前 `provider/source`。
 
 ### 5. 配置
 
-- [ ] 在 `internal/config/config.go` 增加最小配置读取：`AUTONOUS_CONTROL_MAX_TURNS`、`AUTONOUS_CONTROL_MAX_WALL_TIME_SECONDS`、`AUTONOUS_CONTROL_MAX_RETRIES`、`AUTONOUS_MODEL_PROVIDER`、`AUTONOUS_COMMANDER`。
+- [DONE] 在 `internal/config/config.go` 增加最小配置读取：`AUTONOUS_CONTROL_MAX_TURNS`、`AUTONOUS_CONTROL_MAX_WALL_TIME_SECONDS`、`AUTONOUS_CONTROL_MAX_RETRIES`、`AUTONOUS_MODEL_PROVIDER`、`AUTONOUS_COMMANDER`。
+- [PARTIAL] 其余控制参数（如 `max_tokens`、circuit 阈值、no-progress `K`）仍使用内置默认值。
 
 ### 6. 测试
 
-- [ ] 新增 `internal/control/*_test.go`。
-- [ ] 补充 worker 集成测试覆盖 limit/retry/circuit/no-progress。
+- [DONE] 新增 `internal/control/*_test.go`（含 `circuit_test.go`）。
+- [DONE] 补充 worker 集成测试覆盖 limit/retry/no-progress。
+- [DONE] 新增 dummy failure-injection E2E 脚本：`scripts/e2e_m3_dummy.sh`。

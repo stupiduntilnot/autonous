@@ -67,6 +67,20 @@ process task_id=1 chat_id=... text=你好，请回复 OK
 打开 Telegram，检查 `@autonous_bot` 的回复。
 应验证回复内容与测试指令匹配（例如回复中包含正确解析出的时间戳），而不只是“任意文本回复”。
 
+## Milestone 3 Dummy Failure Injection
+
+用于验证控制平面失败处理（`retry/circuit/no-progress/max_wall_time`）：
+
+```bash
+scripts/e2e_m3_dummy.sh
+```
+
+该脚本会使用同一 `worker` binary，并通过 ENV 切换到 dummy 实现：
+- `AUTONOUS_MODEL_PROVIDER=dummy`
+- `AUTONOUS_COMMANDER=dummy`
+
+脚本会分别构造失败场景并直接查询 SQLite 断言事件是否出现。
+
 ## 环境变量参考
 
 | 变量 | 默认值 | 说明 |
