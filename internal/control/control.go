@@ -9,6 +9,7 @@ import (
 type Policy struct {
 	MaxTurns    int
 	MaxWallTime time.Duration
+	MaxTokens   int
 	MaxRetries  int
 }
 
@@ -17,6 +18,7 @@ func DefaultPolicy() Policy {
 	return Policy{
 		MaxTurns:    1,
 		MaxWallTime: 120 * time.Second,
+		MaxTokens:   8000,
 		MaxRetries:  3,
 	}
 }
@@ -27,6 +29,7 @@ type LimitType string
 const (
 	LimitTurns    LimitType = "max_turns"
 	LimitWallTime LimitType = "max_wall_time_seconds"
+	LimitTokens   LimitType = "max_tokens"
 )
 
 // LimitError indicates a run limit was reached.
@@ -64,6 +67,17 @@ func CheckWallTime(p Policy, startedAt time.Time, now time.Time) error {
 			Value:     int64(elapsed.Seconds()),
 			Threshold: int64(limit.Seconds()),
 		}
+	}
+	return nil
+}
+
+// CheckTokenLimit validates cumulative token usage against policy.
+func CheckTokenLimit(p Policy, usedTokens int) error {
+	if p.MaxTokens <= 0 {
+		return &LimitError{Type: LimitTokens, Value: int64(usedTokens), Threshold: int64(p.MaxTokens)}
+	}
+	if usedTokens > p.MaxTokens {
+		return &LimitError{Type: LimitTokens, Value: int64(usedTokens), Threshold: int64(p.MaxTokens)}
 	}
 	return nil
 }

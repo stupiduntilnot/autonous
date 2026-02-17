@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/sha1"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -64,9 +67,11 @@ func main() {
 	policy := control.Policy{
 		MaxTurns:    cfg.ControlMaxTurns,
 		MaxWallTime: time.Duration(cfg.ControlMaxWallTimeSeconds) * time.Second,
+		MaxTokens:   control.DefaultPolicy().MaxTokens,
 		MaxRetries:  cfg.ControlMaxRetries,
 	}
 	circuit := control.NewCircuitBreaker(5, 30*time.Second)
+	const noProgressK = 3
 
 	// Derive offset from inbox, or bootstrap on first run.
 	offset, err := db.DeriveOffset(database)
@@ -100,7 +105,9 @@ func main() {
 			continue
 		}
 		if prevState == control.CircuitOpen && circuit.State() == control.CircuitHalfOpen {
-			db.LogEvent(database, &workerEventID, db.EventCircuitHalfOpen, map[string]any{})
+			db.LogEvent(database, &workerEventID, db.EventCircuitHalfOpen, map[string]any{
+				"error_class": circuit.OpenedClass(),
+			})
 		}
 
 		pollTimeout := cfg.Timeout
@@ -111,8 +118,22 @@ func main() {
 		updates, err := commander.GetUpdates(offset, pollTimeout)
 		if err != nil {
 			log.Printf("getUpdates error: %v", err)
+			errClass := classifyError(err)
+			prevCircuit := circuit.State()
+			circuit.RecordFailure(errClass, time.Now())
+			if prevCircuit != control.CircuitOpen && circuit.State() == control.CircuitOpen {
+				db.LogEvent(database, &workerEventID, db.EventCircuitOpened, map[string]any{
+					"error_class":      errClass,
+					"threshold":        circuit.Threshold,
+					"cooldown_seconds": int(circuit.Cooldown.Seconds()),
+				})
+			}
 			time.Sleep(time.Duration(cfg.SleepSeconds) * time.Second)
 			continue
+		}
+		if circuit.State() == control.CircuitHalfOpen && circuit.OpenedClass() == "command_source_api" {
+			circuit.RecordSuccess()
+			db.LogEvent(database, &workerEventID, db.EventCircuitClosed, map[string]any{"recovered": true})
 		}
 
 		for _, update := range updates {
@@ -175,18 +196,36 @@ func main() {
 			}
 
 			if control.ShouldRetry(policy, int(task.Attempts)) {
-				backoff := control.RetryBackoffSeconds(int(task.Attempts))
-				db.LogEvent(database, &workerEventID, db.EventRetryScheduled, map[string]any{
-					"task_id":         task.ID,
-					"attempt":         task.Attempts,
-					"backoff_seconds": backoff,
-					"error_class":     errClass,
-				})
+				fp := buildStateFingerprint(database, cfg.HistoryWindow, task.ChatID, task.ID, errClass, "")
+				if progressStalled(database, task.ID, fp, noProgressK) {
+					db.LogEvent(database, &agentEventID, db.EventProgressStalled, map[string]any{
+						"task_id":           task.ID,
+						"k":                 noProgressK,
+						"state_fingerprint": fp,
+					})
+					markTaskExhausted(database, task.ID, msg, policy.MaxRetries)
+					db.LogEvent(database, &workerEventID, db.EventRetryExhausted, map[string]any{
+						"task_id":          task.ID,
+						"attempts":         task.Attempts,
+						"last_error_class": errClass,
+					})
+				} else {
+					backoff := control.RetryBackoffSeconds(int(task.Attempts))
+					db.LogEvent(database, &workerEventID, db.EventRetryScheduled, map[string]any{
+						"task_id":           task.ID,
+						"attempt":           task.Attempts,
+						"backoff_seconds":   backoff,
+						"error_class":       errClass,
+						"state_fingerprint": fp,
+					})
+				}
 			} else {
+				backoff := control.RetryBackoffSeconds(int(task.Attempts))
 				db.LogEvent(database, &workerEventID, db.EventRetryExhausted, map[string]any{
 					"task_id":          task.ID,
 					"attempts":         task.Attempts,
 					"last_error_class": errClass,
+					"last_backoff":     backoff,
 				})
 			}
 			db.LogEvent(database, &workerEventID, db.EventAgentFailed, map[string]any{
@@ -282,6 +321,11 @@ func processTask(
 		"input_tokens":  resp.InputTokens,
 		"output_tokens": resp.OutputTokens,
 	})
+	totalTokens := resp.InputTokens + resp.OutputTokens
+	if err := control.CheckTokenLimit(policy, totalTokens); err != nil {
+		recordLimitEvent(database, agentEventID, task.ID, err)
+		return err
+	}
 
 	if err := commander.SendMessage(task.ChatID, resp.Content); err != nil {
 		return err
@@ -416,6 +460,19 @@ func markTaskFailed(database *sql.DB, taskID int64, errMsg string) {
 		truncate(errMsg, 1000), taskID)
 }
 
+func markTaskExhausted(database *sql.DB, taskID int64, errMsg string, maxRetries int) {
+	exhaustedAttempts := maxRetries + 1
+	if exhaustedAttempts < 1 {
+		exhaustedAttempts = 1
+	}
+	database.Exec(
+		"UPDATE inbox SET status = 'failed', attempts = ?, updated_at = unixepoch(), error = ? WHERE id = ?",
+		exhaustedAttempts,
+		truncate(errMsg, 1000),
+		taskID,
+	)
+}
+
 func bootstrapOffset(commander cmdpkg.Commander, pendingWindowSeconds int64, pendingMaxMessages int) (int64, error) {
 	updates, err := commander.GetUpdates(0, 0)
 	if err != nil {
@@ -493,6 +550,91 @@ func classifyError(err error) string {
 		return "db"
 	default:
 		return "unknown"
+	}
+}
+
+func buildStateFingerprint(database *sql.DB, historyWindow int, chatID int64, taskID int64, errClass string, reply string) string {
+	historyCount := historyCount(database, chatID)
+	compressedCount := historyCount
+	if historyWindow > 0 && compressedCount > historyWindow {
+		compressedCount = historyWindow
+	}
+	replyHash := ""
+	if reply != "" {
+		h := sha1.Sum([]byte(reply))
+		replyHash = hex.EncodeToString(h[:8])
+	}
+	return fmt.Sprintf("task=%d|hist=%d|comp=%d|err=%s|reply=%s",
+		taskID, historyCount, compressedCount, errClass, replyHash)
+}
+
+func progressStalled(database *sql.DB, taskID int64, current string, k int) bool {
+	if k <= 1 {
+		return false
+	}
+	prev := recentFingerprints(database, taskID, k-1)
+	fps := make([]string, 0, len(prev)+1)
+	fps = append(fps, prev...)
+	fps = append(fps, current)
+	return control.NoProgress(fps, k)
+}
+
+func recentFingerprints(database *sql.DB, taskID int64, limit int) []string {
+	if limit <= 0 {
+		return nil
+	}
+	rows, err := database.Query(
+		`SELECT payload FROM events
+		 WHERE event_type = ?
+		 ORDER BY id DESC LIMIT ?`,
+		db.EventRetryScheduled, 200,
+	)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	result := make([]string, 0, limit)
+	for rows.Next() && len(result) < limit {
+		var payload sql.NullString
+		if scanErr := rows.Scan(&payload); scanErr != nil || !payload.Valid {
+			continue
+		}
+		var p map[string]any
+		if unmarshalErr := json.Unmarshal([]byte(payload.String), &p); unmarshalErr != nil {
+			continue
+		}
+		pTaskID, ok := numberToInt64(p["task_id"])
+		if !ok || pTaskID != taskID {
+			continue
+		}
+		fp, _ := p["state_fingerprint"].(string)
+		if fp == "" {
+			continue
+		}
+		result = append([]string{fp}, result...)
+	}
+	return result
+}
+
+func historyCount(database *sql.DB, chatID int64) int {
+	var count int
+	if err := database.QueryRow("SELECT COUNT(*) FROM history WHERE chat_id = ?", chatID).Scan(&count); err != nil {
+		return 0
+	}
+	return count
+}
+
+func numberToInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	default:
+		return 0, false
 	}
 }
 

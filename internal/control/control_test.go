@@ -26,6 +26,16 @@ func TestCheckWallTime(t *testing.T) {
 	}
 }
 
+func TestCheckTokenLimit(t *testing.T) {
+	p := Policy{MaxTokens: 10}
+	if err := CheckTokenLimit(p, 10); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if err := CheckTokenLimit(p, 11); err == nil {
+		t.Fatal("expected token limit error")
+	}
+}
+
 func TestRetryBackoffSeconds(t *testing.T) {
 	cases := []struct {
 		attempt int

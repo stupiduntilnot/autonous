@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -127,5 +128,72 @@ func TestProcessTask_RecordsLimitEvent(t *testing.T) {
 	}
 	if cnt != 1 {
 		t.Fatalf("expected 1 control.limit_reached event, got %d", cnt)
+	}
+}
+
+func TestProcessTask_RecordsTokenLimitEvent(t *testing.T) {
+	database := testWorkerDB(t)
+	commander, err := dummy.NewCommander("ok", "ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider, err := dummy.NewProvider("dummy", "ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.WorkerConfig{
+		OpenAIModel:   "dummy",
+		SystemPrompt:  "sys",
+		HistoryWindow: 12,
+	}
+	task := &queueTask{ID: 2, ChatID: 1, UpdateID: 2, Text: "hello"}
+	ctxProvider := &ctxpkg.SQLiteProvider{DB: database}
+	ctxCompressor := &ctxpkg.SimpleCompressor{MaxMessages: 12}
+	ctxAssembler := &ctxpkg.StandardAssembler{}
+	policy := control.Policy{
+		MaxTurns:    1,
+		MaxWallTime: 120 * time.Second,
+		MaxTokens:   1,
+		MaxRetries:  3,
+	}
+
+	agentEventID, err := db.LogEvent(database, nil, db.EventAgentStarted, map[string]any{"task_id": 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy)
+	if err == nil {
+		t.Fatal("expected token limit error")
+	}
+
+	var cnt int
+	if qerr := database.QueryRow("SELECT COUNT(*) FROM events WHERE event_type = ?", db.EventControlLimitReached).Scan(&cnt); qerr != nil {
+		t.Fatal(qerr)
+	}
+	if cnt != 1 {
+		t.Fatalf("expected 1 control.limit_reached event, got %d", cnt)
+	}
+}
+
+func TestProgressStalled_UsesRecentFingerprints(t *testing.T) {
+	database := testWorkerDB(t)
+	taskID := int64(42)
+	fp := "task=42|hist=0|comp=0|err=provider_api|reply="
+
+	payload, _ := json.Marshal(map[string]any{
+		"task_id":           taskID,
+		"state_fingerprint": fp,
+	})
+	if _, err := database.Exec(
+		"INSERT INTO events (event_type, payload) VALUES (?, ?), (?, ?)",
+		db.EventRetryScheduled, string(payload),
+		db.EventRetryScheduled, string(payload),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if !progressStalled(database, taskID, fp, 3) {
+		t.Fatal("expected progress stalled for repeated fingerprints")
 	}
 }
