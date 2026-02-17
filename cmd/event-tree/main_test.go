@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/autonous/autonous/internal/db"
+	"github.com/stupiduntilnot/autonous/internal/db"
 )
 
 // testDB creates a temporary SQLite database with schema initialized.

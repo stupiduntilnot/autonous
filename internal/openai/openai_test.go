@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	ctxpkg "github.com/stupiduntilnot/autonous/internal/context"
 )
 
 func TestChatCompletion_WithUsage(t *testing.T) {
@@ -25,7 +27,7 @@ func TestChatCompletion_WithUsage(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL, "test-model", 5*time.Second)
-	result, err := client.ChatCompletion([]Message{{Role: "user", Content: "hi"}})
+	result, err := client.ChatCompletion([]ctxpkg.Message{{Role: "user", Content: "hi"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +56,7 @@ func TestChatCompletion_NoUsage(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL, "test-model", 5*time.Second)
-	result, err := client.ChatCompletion([]Message{{Role: "user", Content: "hi"}})
+	result, err := client.ChatCompletion([]ctxpkg.Message{{Role: "user", Content: "hi"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +84,7 @@ func TestChatCompletion_EmptyChoices(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL, "test-model", 5*time.Second)
-	result, err := client.ChatCompletion([]Message{{Role: "user", Content: "hi"}})
+	result, err := client.ChatCompletion([]ctxpkg.Message{{Role: "user", Content: "hi"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +105,7 @@ func TestChatCompletion_HTTPError(t *testing.T) {
 	defer server.Close()
 
 	client := NewClient("test-key", server.URL, "test-model", 5*time.Second)
-	_, err := client.ChatCompletion([]Message{{Role: "user", Content: "hi"}})
+	_, err := client.ChatCompletion([]ctxpkg.Message{{Role: "user", Content: "hi"}})
 	if err == nil {
 		t.Fatal("expected error for 429 response")
 	}

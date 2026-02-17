@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	ctxpkg "github.com/stupiduntilnot/autonous/internal/context"
 )
 
 // Client is a minimal OpenAI chat completions client.
@@ -30,12 +32,6 @@ func NewClient(apiKey, url, model string, timeout time.Duration) *Client {
 	}
 }
 
-// Message represents a chat message.
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
 // CompletionResponse is the common response model for all model adapters.
 type CompletionResponse struct {
 	Content      string
@@ -43,9 +39,15 @@ type CompletionResponse struct {
 	OutputTokens int
 }
 
+// message is the internal JSON-serializable chat message for OpenAI API.
+type message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
 type chatRequest struct {
 	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
+	Messages    []message `json:"messages"`
 	Temperature float32   `json:"temperature,omitempty"`
 }
 
@@ -64,10 +66,15 @@ type usage struct {
 }
 
 // ChatCompletion sends a chat completion request and returns a CompletionResponse.
-func (c *Client) ChatCompletion(messages []Message) (CompletionResponse, error) {
+func (c *Client) ChatCompletion(messages []ctxpkg.Message) (CompletionResponse, error) {
+	internal := make([]message, len(messages))
+	for i, m := range messages {
+		internal[i] = message{Role: m.Role, Content: m.Content}
+	}
+
 	reqBody := chatRequest{
 		Model:       c.model,
-		Messages:    messages,
+		Messages:    internal,
 		Temperature: 0.2,
 	}
 	payload, err := json.Marshal(reqBody)

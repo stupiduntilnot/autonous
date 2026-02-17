@@ -70,6 +70,7 @@ docker run -d \
   --name "$CONTAINER_NAME" \
   --restart unless-stopped \
   --env-file "$ENV_FILE" \
+  -v "${WORKDIR}:/workspace" \
   -e WORKER_SUICIDE_EVERY="$WORKER_SUICIDE_EVERY" \
   -e TG_PENDING_WINDOW_SECONDS="$TG_PENDING_WINDOW_SECONDS" \
   "$IMAGE_NAME" >/dev/null

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/autonous/autonous/internal/db"
+	"github.com/stupiduntilnot/autonous/internal/db"
 )
 
 // TestE2E_TreeOutput builds the binary and runs it against a seeded database,

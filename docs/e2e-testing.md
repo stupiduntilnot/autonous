@@ -20,6 +20,8 @@ docker run -d \
   autonous-agent:dev
 ```
 
+注意：不要挂载 `/state`。数据库文件应仅存在于容器内（`/state/agent.db`）。
+
 容器启动时 `startup.sh` 会自动编译 binary 并启动 Supervisor → Worker。
 
 确认启动成功：

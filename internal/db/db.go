@@ -30,7 +30,8 @@ const (
 	EventToolCallStarted = "tool_call.started"
 	EventToolCallDone    = "tool_call.completed"
 	EventToolCallFailed  = "tool_call.failed"
-	EventReplySent       = "reply.sent"
+	EventReplySent         = "reply.sent"
+	EventContextAssembled  = "context.assembled"
 )
 
 // OpenDB opens (or creates) a SQLite database at the given path, ensuring

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/autonous/autonous/internal/config"
-	"github.com/autonous/autonous/internal/db"
+	"github.com/stupiduntilnot/autonous/internal/config"
+	"github.com/stupiduntilnot/autonous/internal/db"
 )
 
 func main() {

@@ -7,10 +7,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/autonous/autonous/internal/config"
-	"github.com/autonous/autonous/internal/db"
-	"github.com/autonous/autonous/internal/openai"
-	"github.com/autonous/autonous/internal/telegram"
+	"github.com/stupiduntilnot/autonous/internal/config"
+	ctxpkg "github.com/stupiduntilnot/autonous/internal/context"
+	"github.com/stupiduntilnot/autonous/internal/db"
+	"github.com/stupiduntilnot/autonous/internal/openai"
+	"github.com/stupiduntilnot/autonous/internal/telegram"
 )
 
 func main() {
@@ -44,6 +45,9 @@ func main() {
 
 	tgClient := telegram.NewClient(cfg.TelegramAPIBase, time.Duration(cfg.Timeout+20)*time.Second)
 	aiClient := openai.NewClient(cfg.OpenAIAPIKey, cfg.OpenAIChatCompURL, cfg.OpenAIModel, 120*time.Second)
+	ctxProvider := &ctxpkg.SQLiteProvider{DB: database}
+	ctxCompressor := &ctxpkg.SimpleCompressor{MaxMessages: cfg.HistoryWindow}
+	ctxAssembler := &ctxpkg.StandardAssembler{}
 
 	// Derive offset from inbox, or bootstrap on first run.
 	offset, err := db.DeriveOffset(database)
@@ -121,7 +125,7 @@ func main() {
 			"text":      truncate(task.Text, 1000),
 		})
 
-		processErr := processTask(database, tgClient, aiClient, &cfg, task, agentEventID)
+		processErr := processTask(database, tgClient, aiClient, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler)
 		if processErr != nil {
 			msg := processErr.Error()
 			markTaskFailed(database, task.ID, msg)
@@ -148,11 +152,32 @@ func main() {
 	}
 }
 
-func processTask(database *sql.DB, tg *telegram.Client, ai *openai.Client, cfg *config.WorkerConfig, task *queueTask, agentEventID int64) error {
-	messages, err := buildMessages(database, cfg.SystemPrompt, task.ChatID, cfg.HistoryWindow, task.Text)
+func processTask(
+	database *sql.DB,
+	tg *telegram.Client,
+	ai *openai.Client,
+	cfg *config.WorkerConfig,
+	task *queueTask,
+	agentEventID int64,
+	provider ctxpkg.Provider,
+	compressor ctxpkg.Compressor,
+	assembler ctxpkg.Assembler,
+) error {
+	history, err := provider.GetHistory(task.ChatID, cfg.HistoryWindow)
 	if err != nil {
 		return err
 	}
+	compressed := compressor.Compress(history)
+	messages := assembler.Assemble(cfg.SystemPrompt, compressed, task.Text)
+
+	db.LogEvent(database, &agentEventID, db.EventContextAssembled, map[string]any{
+		"original_count":   len(history),
+		"compressed_count": len(compressed),
+		"max_messages":     cfg.HistoryWindow,
+		"system_tokens":    estimateTokens(cfg.SystemPrompt),
+		"history_tokens":   estimateTokensFromMessages(compressed),
+		"user_tokens":      estimateTokens(task.Text),
+	})
 
 	// Log turn.started.
 	db.LogEvent(database, &agentEventID, db.EventTurnStarted, map[string]any{
@@ -197,46 +222,8 @@ type queueTask struct {
 	Text     string
 }
 
-
 func appendHistory(database *sql.DB, chatID int64, role, text string) {
 	database.Exec("INSERT INTO history (chat_id, role, text) VALUES (?, ?, ?)", chatID, role, text)
-}
-
-func recentHistory(database *sql.DB, chatID int64, limit int) []openai.Message {
-	rows, err := database.Query(
-		"SELECT role, text FROM history WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
-		chatID, limit,
-	)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-
-	var results []openai.Message
-	for rows.Next() {
-		var role, text string
-		if err := rows.Scan(&role, &text); err != nil {
-			continue
-		}
-		mapped := "user"
-		if role == "assistant" {
-			mapped = "assistant"
-		}
-		results = append(results, openai.Message{Role: mapped, Content: text})
-	}
-	// Reverse to get chronological order.
-	for i, j := 0, len(results)-1; i < j; i, j = i+1, j-1 {
-		results[i], results[j] = results[j], results[i]
-	}
-	return results
-}
-
-func buildMessages(database *sql.DB, systemPrompt string, chatID int64, historyWindow int, userText string) ([]openai.Message, error) {
-	var messages []openai.Message
-	messages = append(messages, openai.Message{Role: "system", Content: systemPrompt})
-	messages = append(messages, recentHistory(database, chatID, historyWindow)...)
-	messages = append(messages, openai.Message{Role: "user", Content: userText})
-	return messages, nil
 }
 
 func enqueueMessage(database *sql.DB, updateID, chatID int64, text string, messageDate int64) (bool, error) {
@@ -250,7 +237,6 @@ func enqueueMessage(database *sql.DB, updateID, chatID int64, text string, messa
 	affected, _ := result.RowsAffected()
 	return affected > 0, nil
 }
-
 
 func hasRunnableTasks(database *sql.DB) bool {
 	var exists int64
@@ -303,7 +289,6 @@ func markTaskFailed(database *sql.DB, taskID int64, errMsg string) {
 		truncate(errMsg, 1000), taskID)
 }
 
-
 func bootstrapOffset(tg *telegram.Client, pendingWindowSeconds int64, pendingMaxMessages int) (int64, error) {
 	updates, err := tg.GetUpdates(0, 0)
 	if err != nil {
@@ -340,4 +325,23 @@ func truncate(s string, maxChars int) string {
 		return s
 	}
 	return string(runes[:maxChars])
+}
+
+func estimateTokens(text string) int {
+	chars := len([]rune(text))
+	if chars <= 0 {
+		return 0
+	}
+	return (chars + 3) / 4
+}
+
+func estimateTokensFromMessages(messages []ctxpkg.Message) int {
+	totalChars := 0
+	for _, msg := range messages {
+		totalChars += len([]rune(msg.Content))
+	}
+	if totalChars <= 0 {
+		return 0
+	}
+	return (totalChars + 3) / 4
 }

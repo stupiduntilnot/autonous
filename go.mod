@@ -1,4 +1,4 @@
-module github.com/autonous/autonous
+module github.com/stupiduntilnot/autonous
 
 go 1.26.0
 
