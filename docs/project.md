@@ -105,6 +105,6 @@ Agent 具备自我更新能力后，宿主机不再参与开发：
 - `TELEGRAM_BOT_TOKEN`
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL`
-- `TG_DB_PATH`
+- `AUTONOUS_DB_PATH`
 - `INSTANCE_ID` (用于 `supervisor`)
 - `PARENT_RUN_ID` (用于 `worker`)

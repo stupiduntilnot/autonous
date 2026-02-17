@@ -32,7 +32,7 @@ func main() {
 		noPayload bool
 	)
 
-	flag.StringVar(&dbPath, "db", envOrDefault("TG_DB_PATH", "./autonous.db"), "SQLite database path")
+	flag.StringVar(&dbPath, "db", envOrDefault("AUTONOUS_DB_PATH", "/state/agent.db"), "SQLite database path")
 	flag.Int64Var(&eventID, "id", 0, "show subtree of a specific event ID")
 	flag.IntVar(&maxDepth, "L", 0, "limit display depth (0 = unlimited)")
 	flag.BoolVar(&jsonOut, "json", false, "output JSON format")

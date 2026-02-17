@@ -59,7 +59,7 @@ event-tree [flags]
 
 | flag | 说明 | 默认值 |
 |---|---|---|
-| `--db <path>` | SQLite 数据库路径 | `$TG_DB_PATH` 或 `./autonous.db` |
+| `--db <path>` | SQLite 数据库路径 | `$AUTONOUS_DB_PATH` 或 `/state/agent.db` |
 | `--json` | 输出 JSON 格式（而非 tree 格式） | false |
 | `--no-payload` | 不展示 payload 详情 | false |
 

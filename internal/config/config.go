@@ -24,7 +24,7 @@ func LoadSupervisorConfig() SupervisorConfig {
 	return SupervisorConfig{
 		WorkerBin:           envOrDefault("WORKER_BIN", "/workspace/bin/worker"),
 		WorkspaceDir:        envOrDefault("WORKSPACE_DIR", "/workspace"),
-		StateDBPath:         envOrDefault("TG_DB_PATH", "/state/agent.db"),
+		StateDBPath:         envOrDefault("AUTONOUS_DB_PATH", "/state/agent.db"),
 		RestartDelaySeconds: envIntOrDefault("SUPERVISOR_RESTART_DELAY_SECONDS", 1),
 		CrashWindowSeconds:  envIntOrDefault("SUPERVISOR_CRASH_WINDOW_SECONDS", 300),
 		CrashThreshold:      envIntOrDefault("SUPERVISOR_CRASH_THRESHOLD", 3),
@@ -81,7 +81,7 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		OpenAIChatCompURL:    envOrDefault("OPENAI_CHAT_COMPLETIONS_URL", "https://api.openai.com/v1/chat/completions"),
 		OpenAIModel:          envOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
 		SystemPrompt:         envOrDefault("WORKER_SYSTEM_PROMPT", "你是 autonous 的执行 Worker。回复简洁、准确；需要时给出可执行步骤。"),
-		DBPath:               envOrDefault("TG_DB_PATH", "/state/agent.db"),
+		DBPath:               envOrDefault("AUTONOUS_DB_PATH", "/state/agent.db"),
 	}, nil
 }
 
