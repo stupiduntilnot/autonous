@@ -58,6 +58,11 @@ type WorkerConfig struct {
 	ControlMaxTurns           int
 	ControlMaxWallTimeSeconds int
 	ControlMaxRetries         int
+	ToolTimeoutSeconds        int
+	ToolMaxOutputLines        int
+	ToolMaxOutputBytes        int
+	ToolBashDenylist          string
+	ToolAllowedRoots          string
 }
 
 // LoadWorkerConfig reads worker configuration from environment variables.
@@ -101,6 +106,11 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		ControlMaxTurns:           envIntOrDefault("AUTONOUS_CONTROL_MAX_TURNS", 1),
 		ControlMaxWallTimeSeconds: envIntOrDefault("AUTONOUS_CONTROL_MAX_WALL_TIME_SECONDS", 120),
 		ControlMaxRetries:         envIntOrDefault("AUTONOUS_CONTROL_MAX_RETRIES", 3),
+		ToolTimeoutSeconds:        envIntOrDefault("AUTONOUS_TOOL_TIMEOUT_SECONDS", 30),
+		ToolMaxOutputLines:        envIntOrDefault("AUTONOUS_TOOL_MAX_OUTPUT_LINES", 2000),
+		ToolMaxOutputBytes:        envIntOrDefault("AUTONOUS_TOOL_MAX_OUTPUT_BYTES", 51200),
+		ToolBashDenylist:          envOrDefault("AUTONOUS_TOOL_BASH_DENYLIST", ""),
+		ToolAllowedRoots:          envOrDefault("AUTONOUS_TOOL_ALLOWED_ROOTS", "/workspace,/state"),
 	}, nil
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
@@ -20,6 +21,7 @@ import (
 	modelpkg "github.com/stupiduntilnot/autonous/internal/model"
 	"github.com/stupiduntilnot/autonous/internal/openai"
 	"github.com/stupiduntilnot/autonous/internal/telegram"
+	toolpkg "github.com/stupiduntilnot/autonous/internal/tool"
 )
 
 func main() {
@@ -72,6 +74,19 @@ func main() {
 	}
 	circuit := control.NewCircuitBreaker(5, 30*time.Second)
 	const noProgressK = 3
+	toolPolicy, err := toolpkg.NewPolicy(cfg.ToolAllowedRoots, cfg.ToolBashDenylist)
+	if err != nil {
+		log.Fatalf("[worker] invalid tool policy: %v", err)
+	}
+	registry := toolpkg.NewRegistry()
+	if err := registry.Register(toolpkg.NewLS(
+		toolPolicy,
+		"/workspace",
+		time.Duration(cfg.ToolTimeoutSeconds)*time.Second,
+		toolpkg.Limits{MaxLines: cfg.ToolMaxOutputLines, MaxBytes: cfg.ToolMaxOutputBytes},
+	)); err != nil {
+		log.Fatalf("[worker] failed to register tool ls: %v", err)
+	}
 
 	// Derive offset from inbox, or bootstrap on first run.
 	offset, err := db.DeriveOffset(database)
@@ -180,7 +195,7 @@ func main() {
 			"text":      truncate(task.Text, 1000),
 		})
 
-		processErr := processTask(database, commander, modelProvider, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy)
+		processErr := processTask(database, commander, modelProvider, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, registry)
 		if processErr != nil {
 			msg := processErr.Error()
 			markTaskFailed(database, task.ID, msg)
@@ -269,6 +284,7 @@ func processTask(
 	compressor ctxpkg.Compressor,
 	assembler ctxpkg.Assembler,
 	policy control.Policy,
+	registry *toolpkg.Registry,
 ) error {
 	startedAt := time.Now()
 	usedTurns := 0
@@ -298,7 +314,7 @@ func processTask(
 	})
 
 	// Log turn.started.
-	db.LogEvent(database, &agentEventID, db.EventTurnStarted, map[string]any{
+	turnEventID, _ := db.LogEvent(database, &agentEventID, db.EventTurnStarted, map[string]any{
 		"model_name": cfg.OpenAIModel,
 	})
 	usedTurns++
@@ -327,7 +343,46 @@ func processTask(
 		return err
 	}
 
-	if err := commander.SendMessage(task.ChatID, resp.Content); err != nil {
+	finalReply := strings.TrimSpace(resp.Content)
+	toolEnvelope, hasToolProtocol := parseToolProtocol(finalReply)
+	if hasToolProtocol && len(toolEnvelope.ToolCalls) > 0 {
+		toolResultsText, err := executeToolCalls(database, turnEventID, registry, toolEnvelope.ToolCalls)
+		if err != nil {
+			return err
+		}
+		if err := control.CheckTurnLimit(policy, usedTurns); err != nil {
+			recordLimitEvent(database, agentEventID, task.ID, err)
+			return err
+		}
+		usedTurns++
+		messages = append(messages,
+			ctxpkg.Message{Role: "assistant", Content: finalReply},
+			ctxpkg.Message{Role: "user", Content: "Tool results:\n" + toolResultsText + "\nReturn JSON: {\"tool_calls\":[],\"final_answer\":\"...\"}"},
+		)
+		toolTurnEventID, _ := db.LogEvent(database, &agentEventID, db.EventTurnStarted, map[string]any{
+			"model_name": cfg.OpenAIModel,
+		})
+		nextTurnStart := time.Now()
+		nextResp, nextErr := modelProvider.ChatCompletion(messages)
+		if nextErr != nil {
+			return nextErr
+		}
+		db.LogEvent(database, &agentEventID, db.EventTurnCompleted, map[string]any{
+			"model_name":    cfg.OpenAIModel,
+			"latency_ms":    time.Since(nextTurnStart).Milliseconds(),
+			"input_tokens":  nextResp.InputTokens,
+			"output_tokens": nextResp.OutputTokens,
+		})
+		finalReply = strings.TrimSpace(nextResp.Content)
+		if parsed, ok := parseToolProtocol(finalReply); ok {
+			finalReply = strings.TrimSpace(parsed.FinalAnswer)
+		}
+		_ = toolTurnEventID
+	}
+	if finalReply == "" {
+		return fmt.Errorf("validation: empty final reply")
+	}
+	if err := commander.SendMessage(task.ChatID, finalReply); err != nil {
 		return err
 	}
 
@@ -337,8 +392,69 @@ func processTask(
 	})
 
 	appendHistory(database, task.ChatID, "user", task.Text)
-	appendHistory(database, task.ChatID, "assistant", resp.Content)
+	appendHistory(database, task.ChatID, "assistant", finalReply)
 	return nil
+}
+
+type toolCall struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+}
+
+type toolProtocol struct {
+	ToolCalls   []toolCall `json:"tool_calls"`
+	FinalAnswer string     `json:"final_answer"`
+}
+
+func parseToolProtocol(content string) (toolProtocol, bool) {
+	var parsed toolProtocol
+	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+		return toolProtocol{}, false
+	}
+	return parsed, true
+}
+
+func executeToolCalls(database *sql.DB, turnEventID int64, registry *toolpkg.Registry, calls []toolCall) (string, error) {
+	var out strings.Builder
+	for _, c := range calls {
+		toolName := strings.TrimSpace(c.Name)
+		if toolName == "" {
+			return "", fmt.Errorf("validation: empty tool name")
+		}
+		t, ok := registry.Get(toolName)
+		if !ok {
+			return "", fmt.Errorf("validation: unknown tool: %s", toolName)
+		}
+		toolEventID, _ := db.LogEvent(database, &turnEventID, db.EventToolCallStarted, map[string]any{
+			"tool_name": toolName,
+			"arguments": truncate(string(c.Arguments), 500),
+		})
+		started := time.Now()
+		res, err := t.Execute(context.Background(), c.Arguments)
+		if err != nil {
+			db.LogEvent(database, &toolEventID, db.EventToolCallFailed, map[string]any{
+				"tool_name":   toolName,
+				"error":       truncate(err.Error(), 500),
+				"error_class": "tool_exec",
+			})
+			return "", err
+		}
+		db.LogEvent(database, &toolEventID, db.EventToolCallDone, map[string]any{
+			"tool_name":       toolName,
+			"latency_ms":      time.Since(started).Milliseconds(),
+			"exit_code":       res.ExitCode,
+			"truncated_lines": res.TruncatedLines,
+			"truncated_bytes": res.TruncatedBytes,
+		})
+		out.WriteString("tool=" + toolName + "\n")
+		if strings.TrimSpace(res.Stdout) != "" {
+			out.WriteString("stdout:\n" + res.Stdout + "\n")
+		}
+		if strings.TrimSpace(res.Stderr) != "" {
+			out.WriteString("stderr:\n" + res.Stderr + "\n")
+		}
+	}
+	return out.String(), nil
 }
 
 // --- DB helper functions ---
