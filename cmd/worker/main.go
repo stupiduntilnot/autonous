@@ -87,6 +87,9 @@ func main() {
 	)); err != nil {
 		log.Fatalf("[worker] failed to register tool ls: %v", err)
 	}
+	if policy.MaxTurns < 2 {
+		policy.MaxTurns = 2
+	}
 
 	// Derive offset from inbox, or bootstrap on first run.
 	offset, err := db.DeriveOffset(database)
@@ -303,7 +306,7 @@ func processTask(
 	}
 	compressed := compressor.Compress(history)
 	messages := assembler.Assemble(cfg.SystemPrompt, compressed, task.Text)
-	toolInstruction := buildToolProtocolInstruction(registry)
+	toolInstruction := buildToolProtocolInstruction(registry, cfg.ToolAllowedRoots)
 	messages = injectToolInstruction(messages, toolInstruction)
 
 	db.LogEvent(database, &agentEventID, db.EventContextAssembled, map[string]any{
@@ -353,7 +356,45 @@ func processTask(
 	if hasToolProtocol && len(toolEnvelope.ToolCalls) > 0 {
 		toolResultsText, err := executeToolCalls(database, turnEventID, registry, toolEnvelope.ToolCalls)
 		if err != nil {
-			return err
+			if !isRecoverableToolError(err) {
+				return err
+			}
+			if err := control.CheckTurnLimit(policy, usedTurns); err != nil {
+				recordLimitEvent(database, agentEventID, task.ID, err)
+				return err
+			}
+			usedTurns++
+			repairTurnEventID, _ := db.LogEvent(database, &agentEventID, db.EventTurnStarted, map[string]any{
+				"model_name": cfg.OpenAIModel,
+			})
+			repairPrompt := "Previous tool call failed: " + truncate(err.Error(), 600) + ". " +
+				"Regenerate strict JSON with corrected tool arguments. " +
+				"For ls, path must be \".\" or a path inside allowlist roots; never use \"/\". " +
+				"Return only JSON: {\"tool_calls\":[...],\"final_answer\":\"...\"}."
+			messages = append(messages,
+				ctxpkg.Message{Role: "assistant", Content: finalReply},
+				ctxpkg.Message{Role: "user", Content: repairPrompt},
+			)
+			repairStart := time.Now()
+			repairResp, repairErr := modelProvider.ChatCompletion(messages)
+			if repairErr != nil {
+				return repairErr
+			}
+			db.LogEvent(database, &agentEventID, db.EventTurnCompleted, map[string]any{
+				"model_name":    cfg.OpenAIModel,
+				"latency_ms":    time.Since(repairStart).Milliseconds(),
+				"input_tokens":  repairResp.InputTokens,
+				"output_tokens": repairResp.OutputTokens,
+			})
+			repaired, ok := parseToolProtocol(strings.TrimSpace(repairResp.Content))
+			if !ok || len(repaired.ToolCalls) == 0 {
+				return fmt.Errorf("validation: tool repair response missing tool_calls")
+			}
+			toolResultsText, err = executeToolCalls(database, repairTurnEventID, registry, repaired.ToolCalls)
+			if err != nil {
+				return err
+			}
+			finalReply = strings.TrimSpace(repairResp.Content)
 		}
 		if err := control.CheckTurnLimit(policy, usedTurns); err != nil {
 			recordLimitEvent(database, agentEventID, task.ID, err)
@@ -419,14 +460,21 @@ func parseToolProtocol(content string) (toolProtocol, bool) {
 	return parsed, true
 }
 
-func buildToolProtocolInstruction(registry *toolpkg.Registry) string {
+func buildToolProtocolInstruction(registry *toolpkg.Registry, allowedRoots string) string {
 	names := registry.MustList()
 	toolNames := make([]string, 0, len(names))
 	for _, meta := range names {
 		toolNames = append(toolNames, meta.Name)
 	}
+	roots := strings.TrimSpace(allowedRoots)
+	if roots == "" {
+		roots = "/workspace,/state"
+	}
 	return "You can use tools in this environment. " +
 		"Available tools: " + strings.Join(toolNames, ", ") + ". " +
+		"Allowed roots: " + roots + ". " +
+		"For ls, arguments must include a valid \"path\". " +
+		"Use \".\" for current directory; never use \"/\". " +
 		"Always respond with strict JSON: " +
 		"{\"tool_calls\":[{\"name\":\"...\",\"arguments\":{...}}],\"final_answer\":\"...\"}. " +
 		"If a tool is needed, set final_answer to empty and fill tool_calls. " +
@@ -494,6 +542,17 @@ func executeToolCalls(database *sql.DB, turnEventID int64, registry *toolpkg.Reg
 		}
 	}
 	return out.String(), nil
+}
+
+func isRecoverableToolError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "validation") ||
+		strings.Contains(msg, "required") ||
+		strings.Contains(msg, "unknown tool") ||
+		strings.Contains(msg, "outside allowlist")
 }
 
 // --- DB helper functions ---
