@@ -61,9 +61,18 @@ A minimal context subsystem MVP but with proper interfaces abstraction.
 Prevent runaways, budget overruns, and infinite loops.
 
 ### Deliverables
-- Run limits: `max_steps`, `max_wall_time`, `max_tokens` or `max_cost`
+- Run limits: `max_turns`, `max_wall_time`, `max_tokens` or `max_cost`
 - Error policy: bounded retries with exponential backoff; circuit breaker (same error N times -> stop)
 - Progress checks: "no-progress" detection (K iterations without state change -> stop)
+- Instruction source abstraction: `Commander` interface（本 milestone 仅实现 Telegram）
+- Model provider abstraction: `ModelProvider` interface（本 milestone 仅实现 OpenAI）
+- Failure-injectable dummies for testing:
+  - `DummyCommander`（测试用）
+  - `DummyProvider`（测试用）
+- 运行时选择策略：使用同一 binary，通过环境变量切换实现（`AUTONOUS_MODEL_PROVIDER=openai|dummy`，`AUTONOUS_COMMANDER=telegram|dummy`）。
+- 可观测性要求：启动时必须将当前 `provider/source` 写入 `events`（记录在 worker 的 `process.started` payload）。
+
+详细设计见 [milestone-3.md](./milestone-3.md)。
 
 ## Milestone 4 — Tool Subsystem
 
@@ -100,3 +109,10 @@ Achieve safe self-updates.
 - Tool output 处理：`Compressor` 识别 tool call 结果并单独截断/跳过
 - 多 provider 支持：各 LLM provider 实现自己的 adapter
 - 语义检索：Provider 基于向量相似度检索相关历史，而非简单时间窗口
+- Milestone 3 后续可配置化（当前先使用内置默认值）：
+  - `AUTONOUS_CONTROL_MAX_TOKENS`
+  - `AUTONOUS_CONTROL_RETRY_BASE_SECONDS`
+  - `AUTONOUS_CONTROL_RETRY_MAX_SECONDS`
+  - `AUTONOUS_CONTROL_CIRCUIT_THRESHOLD`
+  - `AUTONOUS_CONTROL_CIRCUIT_COOLDOWN_SECONDS`
+  - `AUTONOUS_CONTROL_NO_PROGRESS_K`
