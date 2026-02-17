@@ -84,7 +84,7 @@ Establish a minimal, orthogonal toolset that supports bootstrapping.
   - strict input schema (typed structs / JSON schema)
   - strict output envelope (stdout/stderr, truncated flags, exit code)
   - timeouts, output size caps, pagination where needed
-- Tool safety policy: tool allowlist; risk tiers (Read / Write / Exec / Network); NO two-phase writes
+- Tool safety policy: tool allowlist; NO two-phase writes
 - Initial atomic tools (no user approval needed): ls, find, grep, read, write, edit, bash
 
 ## Milestone 5 — Self-Update Transaction
@@ -118,3 +118,9 @@ Achieve safe self-updates.
   - `AUTONOUS_CONTROL_NO_PROGRESS_K`
 - Milestone 3 后续验证（在多轮 agent loop 落地后）：
   - 多轮场景下 `max_turns` 语义与事件完整性回归
+- Tool allowlist 后续能力：
+  - 支持将用户批准的路径动态加入 `AUTONOUS_TOOL_ALLOWED_ROOTS`（含审计与过期策略）
+- Tool safety 后续能力：
+  - 引入 `risk_tier` 分层策略（Read/Write/Exec/Network）并接入审计与策略控制
+- Tool reliability 后续能力：
+  - 引入 dead-letter 机制（达到重试上限后进入隔离队列并支持人工/自动重放）
