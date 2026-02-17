@@ -330,7 +330,7 @@ worker := NewWorker(WorkerDeps{
 ### 5. 配置
 
 - [DONE] 在 `internal/config/config.go` 增加最小配置读取：`AUTONOUS_CONTROL_MAX_TURNS`、`AUTONOUS_CONTROL_MAX_WALL_TIME_SECONDS`、`AUTONOUS_CONTROL_MAX_RETRIES`、`AUTONOUS_MODEL_PROVIDER`、`AUTONOUS_COMMANDER`。
-- [PARTIAL] 其余控制参数（如 `max_tokens`、circuit 阈值、no-progress `K`）仍使用内置默认值。
+- [DONE] Milestone 3 scope 内配置项已完成；其余参数可配置化属于后续 milestone 增强项。
 
 ### 6. 测试
 

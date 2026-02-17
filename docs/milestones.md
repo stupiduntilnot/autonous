@@ -55,7 +55,7 @@ A minimal context subsystem MVP but with proper interfaces abstraction.
 
 详细设计见 [milestone-2.md](./milestone-2.md)。
 
-## [IN PROGRESS] Milestone 3 — Basic Control Plane
+## [DONE] Milestone 3 — Basic Control Plane
 
 ### Goal
 Prevent runaways, budget overruns, and infinite loops.
@@ -71,10 +71,6 @@ Prevent runaways, budget overruns, and infinite loops.
 - [DONE] Failure-injection tests:
   - [DONE] unit/integration tests（`internal/control` + `cmd/worker`）
   - [DONE] dummy E2E script（`scripts/e2e_m3_dummy.sh`）
-
-### Remaining Gaps
-- `max_tokens`、circuit 阈值/冷却、no-progress `K` 仍是内置值，尚未开放 ENV 配置。
-- 处理流程仍是单轮 turn 主路径；多轮 agent loop 的 `max_turns` 语义要在后续 milestone（tool loop）继续验证。
 
 详细设计见 [milestone-3.md](./milestone-3.md)。
 
@@ -120,3 +116,5 @@ Achieve safe self-updates.
   - `AUTONOUS_CONTROL_CIRCUIT_THRESHOLD`
   - `AUTONOUS_CONTROL_CIRCUIT_COOLDOWN_SECONDS`
   - `AUTONOUS_CONTROL_NO_PROGRESS_K`
+- Milestone 3 后续验证（在多轮 agent loop 落地后）：
+  - 多轮场景下 `max_turns` 语义与事件完整性回归
