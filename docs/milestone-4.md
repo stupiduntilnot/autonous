@@ -318,33 +318,33 @@ M4 默认命令映射：
 
 ### 1. 抽象与基础设施
 
-- [ ] 新建 `internal/tool` 包：`Tool` 接口、`Registry`、`Result`。
-- [ ] 实现统一输入校验辅助（typed struct / JSON decode + validate）。
-- [ ] 实现输出截断与分页基础组件。
+- [DONE] 新建 `internal/tool` 包：`Tool` 接口、`Registry`、`Result`。
+- [DONE] 实现统一输入校验辅助（typed struct / JSON decode + validate）。
+- [DONE] 实现输出截断与分页基础组件。
 
 ### 2. 安全策略
 
-- [ ] 实现路径 allowlist 与真实路径校验（防 symlink/`..` 逃逸）。
-- [ ] 实现工具策略校验（registered-only + `bash` denylist）。
-- [ ] 实现 timeout 与统一错误分类。
+- [DONE] 实现路径 allowlist 与真实路径校验（防 symlink/`..` 逃逸）。
+- [DONE] 实现工具策略校验（registered-only + `bash` denylist）。
+- [DONE] 实现 timeout 与统一错误分类。
 
 ### 3. 工具实现（MVP）
 
-- [ ] 第一步仅实现 `ls`，用于验证工具子系统全链路。
-- [ ] 为 `ls` 补齐单测（成功/失败/边界）与对应 E2E。
+- [DONE] 第一步仅实现 `ls`，用于验证工具子系统全链路。
+- [DONE] 为 `ls` 补齐单测（成功/失败/边界）与对应 E2E。
 
 ### 4. Worker 集成
 
-- [ ] 在 worker 注入 `ToolRegistry` 与 `ToolRunner`。
-- [ ] 接入模型 tool request 协议并实现最小 tool loop。
-- [ ] 将 tool 事件接入 `events`（started/completed/failed）。
+- [DONE] 在 worker 注入 `ToolRegistry` 与 `ToolRunner`。
+- [DONE] 接入模型 tool request 协议并实现最小 tool loop。
+- [DONE] 将 tool 事件接入 `events`（started/completed/failed）。
 
 ### 5. 配置
 
-- [ ] 在 `internal/config/config.go` 增加 M4 所需 ENV。
-- [ ] 为默认值和非法配置增加启动期校验。
-- [ ] 解析并校验 `AUTONOUS_TOOL_ALLOWED_ROOTS`（非空、绝对路径、去重）。
-- [ ] 更新 `Dockerfile` 预装 M4 所需 CLI 依赖（含 `rg`、`fd`），并在启动期增加命令可用性自检。
+- [DONE] 在 `internal/config/config.go` 增加 M4 所需 ENV。
+- [DONE] 为默认值和非法配置增加启动期校验。
+- [DONE] 解析并校验 `AUTONOUS_TOOL_ALLOWED_ROOTS`（非空、绝对路径、去重）。
+- [DONE] 更新 `Dockerfile` 预装 M4 所需 CLI 依赖（含 `rg`、`fd`），并在启动期增加命令可用性自检。
 
 ### 6. 工具实现：`find`
 
@@ -378,7 +378,7 @@ M4 默认命令映射：
 
 ### 12. 验收
 
-- [ ] `go build ./... && go test ./...` 全通过。
-- [ ] `ls` 的真实 Telegram E2E（含明确 tool 任务指令）通过。
+- [DONE] `go build ./... && go test ./...` 全通过。
+- [DONE] `ls` 的真实 Telegram E2E（含明确 tool 任务指令）通过。
 - [ ] 其余工具按“单工具单任务”逐个完成各自 E2E。
 - [ ] dummy failure-injection 用例通过。
