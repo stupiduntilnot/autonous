@@ -28,8 +28,9 @@
 - Tool Safety Policy
   - allowlist
   - NO two-phase writes
-- 首批 atomic tools（无需人工审批）
-  - `ls`, `find`, `grep`, `read`, `write`, `edit`, `bash`
+- 首批 atomic tools 路线图（无需人工审批）
+  - 第 1 阶段：仅 `ls`（最小可运行）
+  - 第 2 阶段：`find`, `grep`, `read`, `write`, `edit`, `bash`（在机制跑通后逐个补齐）
 - Worker 内最小 tool loop（单 task 内允许多次 tool round，受 M3 限制保护）
 
 ### 非目标（后续 milestone）
@@ -217,6 +218,11 @@ AUTONOUS_TOOL_ALLOWED_ROOTS=/workspace,/state
 
 ## 首批工具规格（MVP）
 
+实施顺序约束（M4）：
+- 先只实现一个最简单工具 `ls`，用于打通完整机制：registry/policy/runner/model-tool loop/events/tests/e2e。
+- 在 `ls` 链路完成并通过 E2E 后，再实现其余工具。
+- 其余工具必须按“单工具单任务”推进：每次只新增一个工具，配套单测与 E2E，再进入下一工具。
+
 实现决策：
 - M4 的 atomic tools **不在 Go 中重写业务逻辑**，统一基于成熟 CLI 工具封装（固定参数模板 + 输入白名单校验 + 超时 + 截断）。
 - 命令选型原则：
@@ -324,8 +330,8 @@ M4 默认命令映射：
 
 ### 3. 工具实现（MVP）
 
-- [ ] 实现 `ls/find/grep/read/write/edit/bash`。
-- [ ] 为每个工具补齐单元测试（成功/失败/边界）。
+- [ ] 第一步仅实现 `ls`，用于验证工具子系统全链路。
+- [ ] 为 `ls` 补齐单测（成功/失败/边界）与对应 E2E。
 
 ### 4. Worker 集成
 
@@ -340,8 +346,39 @@ M4 默认命令映射：
 - [ ] 解析并校验 `AUTONOUS_TOOL_ALLOWED_ROOTS`（非空、绝对路径、去重）。
 - [ ] 更新 `Dockerfile` 预装 M4 所需 CLI 依赖（含 `rg`、`fd`），并在启动期增加命令可用性自检。
 
-### 6. 验收
+### 6. 工具实现：`find`
+
+- [ ] 实现 `find`。
+- [ ] 补齐 `find` 单测（成功/失败/边界）与对应 E2E。
+
+### 7. 工具实现：`grep`
+
+- [ ] 实现 `grep`。
+- [ ] 补齐 `grep` 单测（成功/失败/边界）与对应 E2E。
+
+### 8. 工具实现：`read`
+
+- [ ] 实现 `read`。
+- [ ] 补齐 `read` 单测（成功/失败/边界）与对应 E2E。
+
+### 9. 工具实现：`write`
+
+- [ ] 实现 `write`。
+- [ ] 补齐 `write` 单测（成功/失败/边界）与对应 E2E。
+
+### 10. 工具实现：`edit`
+
+- [ ] 实现 `edit`。
+- [ ] 补齐 `edit` 单测（成功/失败/边界）与对应 E2E。
+
+### 11. 工具实现：`bash`
+
+- [ ] 实现 `bash`。
+- [ ] 补齐 `bash` 单测（成功/失败/边界）与对应 E2E。
+
+### 12. 验收
 
 - [ ] `go build ./... && go test ./...` 全通过。
-- [ ] 真实 Telegram smoke（含明确 tool 任务指令）通过。
+- [ ] `ls` 的真实 Telegram E2E（含明确 tool 任务指令）通过。
+- [ ] 其余工具按“单工具单任务”逐个完成各自 E2E。
 - [ ] dummy failure-injection 用例通过。

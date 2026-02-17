@@ -85,7 +85,9 @@ Establish a minimal, orthogonal toolset that supports bootstrapping.
   - strict output envelope (stdout/stderr, truncated flags, exit code)
   - timeouts, output size caps, pagination where needed
 - Tool safety policy: tool allowlist; NO two-phase writes
-- Initial atomic tools (no user approval needed): ls, find, grep, read, write, edit, bash
+- Initial atomic tools (no user approval needed):
+  - phase 1: `ls` only (用于先打通机制与 E2E)
+  - phase 2: `find`, `grep`, `read`, `write`, `edit`, `bash`（逐个工具、逐个任务推进）
 
 ## Milestone 5 — Self-Update Transaction
 
