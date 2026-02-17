@@ -39,7 +39,7 @@ func main() {
 	if rev := gitHeadRev(cfg.WorkspaceDir); rev != "" {
 		existing, _ := db.CurrentGoodRev(database)
 		if existing == "" {
-			db.LogEvent(database, nil, db.EventRevisionPromoted, map[string]any{"revision": rev})
+			db.LogEvent(database, &supEventID, db.EventRevisionPromoted, map[string]any{"revision": rev})
 			log.Printf("[supervisor] initialized current_good_rev=%s", rev)
 		}
 	}
@@ -102,7 +102,7 @@ func main() {
 		stableThreshold := time.Duration(cfg.StableRunSeconds) * time.Second
 		if uptime >= stableThreshold {
 			if rev := gitHeadRev(cfg.WorkspaceDir); rev != "" {
-				db.LogEvent(database, nil, db.EventRevisionPromoted, map[string]any{"revision": rev})
+				db.LogEvent(database, &supEventID, db.EventRevisionPromoted, map[string]any{"revision": rev})
 			}
 			crashTimes = nil
 		} else {

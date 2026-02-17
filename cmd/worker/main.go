@@ -34,7 +34,7 @@ func main() {
 	if cfg.ParentProcessID > 0 {
 		parentID = &cfg.ParentProcessID
 	}
-	_, err = db.LogEvent(database, parentID, db.EventProcessStarted, map[string]any{
+	workerEventID, err := db.LogEvent(database, parentID, db.EventProcessStarted, map[string]any{
 		"role": "worker",
 		"pid":  os.Getpid(),
 	})
@@ -113,8 +113,8 @@ func main() {
 		handledCount++
 		log.Printf("process task_id=%d chat_id=%d text=%s", task.ID, task.ChatID, truncate(task.Text, 200))
 
-		// Log agent.started (root of agent execution tree).
-		agentEventID, _ := db.LogEvent(database, nil, db.EventAgentStarted, map[string]any{
+		// Log agent.started (child of worker process.started).
+		agentEventID, _ := db.LogEvent(database, &workerEventID, db.EventAgentStarted, map[string]any{
 			"chat_id":   task.ChatID,
 			"task_id":   task.ID,
 			"update_id": task.UpdateID,
@@ -125,7 +125,7 @@ func main() {
 		if processErr != nil {
 			msg := processErr.Error()
 			markTaskFailed(database, task.ID, msg)
-			db.LogEvent(database, &agentEventID, db.EventAgentFailed, map[string]any{
+			db.LogEvent(database, &workerEventID, db.EventAgentFailed, map[string]any{
 				"task_id": task.ID,
 				"error":   truncate(msg, 1000),
 			})
@@ -136,7 +136,7 @@ func main() {
 			log.Printf("task %d failed: %s", task.ID, msg)
 		} else {
 			markTaskDone(database, task.ID)
-			db.LogEvent(database, &agentEventID, db.EventAgentCompleted, map[string]any{
+			db.LogEvent(database, &workerEventID, db.EventAgentCompleted, map[string]any{
 				"task_id": task.ID,
 			})
 		}

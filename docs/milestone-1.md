@@ -107,21 +107,26 @@ Agent  (agent.started -> agent.completed)                 <- 用户发消息到�
 
 Parent 关系：
 
+每个事件的 `parent_id` 指向它所属的 scope。`*.completed` 和 `*.started` 是同一个 scope 的子事件，不存在 started 包含 completed 的关系。
+
 ```
 process.started (id=1, parent_id=NULL)           <- Supervisor
-  process.started (id=2, parent_id=1)            <- Worker
+  worker.spawned (id=2, parent_id=1)
+  process.started (id=3, parent_id=1)            <- Worker
+    agent.started (id=5, parent_id=3)
+    agent.completed (id=15, parent_id=3)
+  worker.exited (id=16, parent_id=1)
 
-agent.started (id=5, parent_id=NULL)             <- 独立的树
+agent.started (id=5) 的子事件:
   turn.started (id=6, parent_id=5)
-    llm_call.completed (id=7, parent_id=6)
-    tool_call.started (id=8, parent_id=6)        <- future: Milestone 2+
-    tool_call.completed (id=9, parent_id=6)
   turn.completed (id=10, parent_id=5)
   turn.started (id=11, parent_id=5)              <- 第二轮（有 tool call 时）
-    llm_call.completed (id=12, parent_id=11)
   turn.completed (id=13, parent_id=5)
   reply.sent (id=14, parent_id=5)
-  agent.completed (id=15, parent_id=5)
+
+turn.started (id=6) 的子事件:
+  tool_call.started (id=8, parent_id=6)          <- future: Milestone 2+
+  tool_call.completed (id=9, parent_id=6)
 ```
 
 ## 任务分解
