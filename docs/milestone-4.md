@@ -264,19 +264,23 @@ M4 默认命令映射：
 - 输出：匹配行（`file:line:text`）
 
 ### `read`
-- 入参：`path`, `offset`, `limit_bytes`
-- 输出：文件片段
+- 入参：`path`, `offset`, `limit`
+  - 当前实现为“按行读取”（`offset` 起始行偏移，`limit` 读取行数），`limit` 必须 `> 0`
+- 输出：文本片段（行级）
 
 ### `write`
-- 入参：`path`, `content`, `mode(append|overwrite)`
-- 输出：写入字节数
+- 入参：`path`, `content`, `append`（`bool`）
+- 输出：统一 `Result`（M4 不单独返回写入字节数字段）
 
 ### `edit`
-- 入参：`path`, `find`, `replace`, `all`
+- 入参：`path`, `old_text`, `new_text`, `all`
 - 输出：替换次数
 
 ### `bash`
-- 入参：`cmd`, `workdir`, `timeout_seconds`
+- 入参：`command|cmd`, `cwd|workdir`
+  - `command` 与 `cmd` 为等价别名
+  - `cwd` 与 `workdir` 为等价别名
+  - 当前 M4 使用全局 `AUTONOUS_TOOL_TIMEOUT_SECONDS`，不支持单次调用覆盖 `timeout_seconds`
 - 输出：`stdout/stderr/exit_code`
 
 ## 测试计划
