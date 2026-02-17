@@ -2,11 +2,35 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	_ "github.com/mattn/go-sqlite3"
+)
+
+// Event type constants — infrastructure events
+const (
+	EventProcessStarted    = "process.started"
+	EventWorkerSpawned     = "worker.spawned"
+	EventWorkerExited      = "worker.exited"
+	EventRevisionPromoted  = "revision.promoted"
+	EventCrashLoopDetected = "crash_loop.detected"
+	EventRollbackAttempted = "rollback.attempted"
+)
+
+// Event type constants — agent execution events
+const (
+	EventAgentStarted    = "agent.started"
+	EventAgentCompleted  = "agent.completed"
+	EventAgentFailed     = "agent.failed"
+	EventTurnStarted     = "turn.started"
+	EventTurnCompleted   = "turn.completed"
+	EventToolCallStarted = "tool_call.started"
+	EventToolCallDone    = "tool_call.completed"
+	EventToolCallFailed  = "tool_call.failed"
+	EventReplySent       = "reply.sent"
 )
 
 // OpenDB opens (or creates) a SQLite database at the given path, ensuring
@@ -31,38 +55,18 @@ func OpenDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// InitSupervisorSchema creates the tables used by the supervisor process.
-func InitSupervisorSchema(db *sql.DB) error {
+// InitSchema creates all tables: events, inbox, history.
+func InitSchema(db *sql.DB) error {
 	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS supervisor_revisions (
-			revision TEXT PRIMARY KEY,
-			build_ok INTEGER NOT NULL DEFAULT 0,
-			health_ok INTEGER NOT NULL DEFAULT 0,
-			promoted_at INTEGER,
-			failure_reason TEXT
+		CREATE TABLE IF NOT EXISTS events (
+			id INTEGER PRIMARY KEY,
+			timestamp INTEGER NOT NULL DEFAULT (unixepoch()),
+			parent_id INTEGER,
+			event_type TEXT NOT NULL,
+			payload TEXT
 		);
-		CREATE TABLE IF NOT EXISTS supervisor_state (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		);
-	`)
-	return err
-}
+		CREATE INDEX IF NOT EXISTS idx_events_parent_id ON events(parent_id);
 
-// InitWorkerSchema creates the tables used by the worker process.
-func InitWorkerSchema(db *sql.DB) error {
-	_, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS history (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			chat_id INTEGER NOT NULL,
-			role TEXT NOT NULL,
-			text TEXT NOT NULL,
-			created_at INTEGER NOT NULL DEFAULT (unixepoch())
-		);
-		CREATE TABLE IF NOT EXISTS kv (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		);
 		CREATE TABLE IF NOT EXISTS inbox (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			update_id INTEGER NOT NULL UNIQUE,
@@ -77,21 +81,41 @@ func InitWorkerSchema(db *sql.DB) error {
 			updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 		);
 		CREATE INDEX IF NOT EXISTS idx_inbox_status_id ON inbox(status, id);
-		CREATE TABLE IF NOT EXISTS task_audit (
+
+		CREATE TABLE IF NOT EXISTS history (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			task_id INTEGER NOT NULL,
 			chat_id INTEGER NOT NULL,
-			update_id INTEGER,
-			phase TEXT NOT NULL,
-			status TEXT NOT NULL,
-			message TEXT,
-			error TEXT,
-			run_id TEXT NOT NULL,
-			worker_instance_id TEXT NOT NULL,
+			role TEXT NOT NULL,
+			text TEXT NOT NULL,
 			created_at INTEGER NOT NULL DEFAULT (unixepoch())
 		);
-		CREATE INDEX IF NOT EXISTS idx_task_audit_task_id ON task_audit(task_id, id);
-		CREATE INDEX IF NOT EXISTS idx_task_audit_phase ON task_audit(phase, created_at);
 	`)
 	return err
+}
+
+// LogEvent inserts an event into the events table and returns its auto-generated id.
+// parentID may be nil for root events. payload is serialized to JSON; nil payload stores NULL.
+func LogEvent(db *sql.DB, parentID *int64, eventType string, payload map[string]any) (int64, error) {
+	var payloadJSON any
+	if payload != nil {
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return 0, fmt.Errorf("marshal event payload: %w", err)
+		}
+		payloadJSON = string(data)
+	}
+
+	res, err := db.Exec(
+		`INSERT INTO events (parent_id, event_type, payload) VALUES (?, ?, ?)`,
+		parentID, eventType, payloadJSON,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("insert event %s: %w", eventType, err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("get event id: %w", err)
+	}
+	return id, nil
 }

@@ -32,9 +32,10 @@
 ## 3. 设计文档
 本文档提供一个宏观的概览。关于具体的实现计划，请参考各个 `milestone` 的文档：
 
-- **[Milestone 0: 基础结构](./docs/milestone-0.md)**: 定义了已完成的 `MVP`。
-- **[Milestone 1: 可观测性计划](./docs/milestone-1.md)**: 详细说明了统一事件日志系统的实现计划。
-- **[Tool Call 设计](./docs/TOOLCALL_DESIGN.md)**: 描述了工具子系统的设计。
+- **[Milestones 路线图](./milestones.md)**: 所有 `milestone` 的目标和交付物概览。
+- **[Milestone 0: 基础结构](./milestone-0.md)**: 定义了已完成的 `MVP`。
+- **[Milestone 1: 可观测性计划](./milestone-1.md)**: 详细说明了统一事件日志系统的实现计划。
+- **[Tool Call 设计](./TOOLCALL_DESIGN.md)**: 描述了工具子系统的设计。
 
 *一份用于指导开发辅助 `LLM` 的原则性文档位于 `AGENTS.md`。*
 
