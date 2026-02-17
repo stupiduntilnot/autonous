@@ -120,7 +120,8 @@ func TestProcessTask_RecordsLimitEvent(t *testing.T) {
 	}
 
 	reg := toolpkg.NewRegistry()
-	err = processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg)
+	runner := toolpkg.NewRunner(reg)
+	err = processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg, runner)
 	if err == nil {
 		t.Fatal("expected limit error")
 	}
@@ -169,7 +170,8 @@ func TestProcessTask_RecordsTokenLimitEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := toolpkg.NewRegistry()
-	err = processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg)
+	runner := toolpkg.NewRunner(reg)
+	err = processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg, runner)
 	if err == nil {
 		t.Fatal("expected token limit error")
 	}
@@ -268,8 +270,9 @@ func TestProcessTask_ToolLoopLS(t *testing.T) {
 	if err := reg.Register(toolpkg.NewLS(p, base, 2*time.Second, toolpkg.Limits{MaxLines: 100, MaxBytes: 4096})); err != nil {
 		t.Fatal(err)
 	}
+	runner := toolpkg.NewRunner(reg)
 
-	if err := processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg); err != nil {
+	if err := processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg, runner); err != nil {
 		t.Fatalf("processTask failed: %v", err)
 	}
 	if commander.last != "tool done" {
@@ -307,7 +310,8 @@ func TestProcessTask_ExtractsFinalAnswerFromJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := toolpkg.NewRegistry()
-	if err := processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg); err != nil {
+	runner := toolpkg.NewRunner(reg)
+	if err := processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg, runner); err != nil {
 		t.Fatalf("processTask failed: %v", err)
 	}
 	if commander.last != "direct final" {

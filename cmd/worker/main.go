@@ -87,6 +87,7 @@ func main() {
 	)); err != nil {
 		log.Fatalf("[worker] failed to register tool ls: %v", err)
 	}
+	toolRunner := toolpkg.NewRunner(registry)
 	if policy.MaxTurns < 2 {
 		policy.MaxTurns = 2
 	}
@@ -198,7 +199,7 @@ func main() {
 			"text":      truncate(task.Text, 1000),
 		})
 
-		processErr := processTask(database, commander, modelProvider, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, registry)
+		processErr := processTask(database, commander, modelProvider, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, registry, toolRunner)
 		if processErr != nil {
 			msg := processErr.Error()
 			markTaskFailed(database, task.ID, msg)
@@ -288,6 +289,7 @@ func processTask(
 	assembler ctxpkg.Assembler,
 	policy control.Policy,
 	registry *toolpkg.Registry,
+	runner *toolpkg.Runner,
 ) error {
 	startedAt := time.Now()
 	usedTurns := 0
@@ -354,7 +356,7 @@ func processTask(
 		finalReply = strings.TrimSpace(toolEnvelope.FinalAnswer)
 	}
 	if hasToolProtocol && len(toolEnvelope.ToolCalls) > 0 {
-		toolResultsText, err := executeToolCalls(database, turnEventID, registry, toolEnvelope.ToolCalls)
+		toolResultsText, err := executeToolCalls(database, turnEventID, runner, toolEnvelope.ToolCalls)
 		if err != nil {
 			if !isRecoverableToolError(err) {
 				return err
@@ -390,7 +392,7 @@ func processTask(
 			if !ok || len(repaired.ToolCalls) == 0 {
 				return fmt.Errorf("validation: tool repair response missing tool_calls")
 			}
-			toolResultsText, err = executeToolCalls(database, repairTurnEventID, registry, repaired.ToolCalls)
+			toolResultsText, err = executeToolCalls(database, repairTurnEventID, runner, repaired.ToolCalls)
 			if err != nil {
 				return err
 			}
@@ -501,23 +503,22 @@ func injectToolInstruction(messages []ctxpkg.Message, instruction string) []ctxp
 	return out
 }
 
-func executeToolCalls(database *sql.DB, turnEventID int64, registry *toolpkg.Registry, calls []toolCall) (string, error) {
+func executeToolCalls(database *sql.DB, turnEventID int64, runner *toolpkg.Runner, calls []toolCall) (string, error) {
 	var out strings.Builder
 	for _, c := range calls {
 		toolName := strings.TrimSpace(c.Name)
 		if toolName == "" {
 			return "", fmt.Errorf("validation: empty tool name")
 		}
-		t, ok := registry.Get(toolName)
-		if !ok {
-			return "", fmt.Errorf("validation: unknown tool: %s", toolName)
-		}
 		toolEventID, _ := db.LogEvent(database, &turnEventID, db.EventToolCallStarted, map[string]any{
 			"tool_name": toolName,
 			"arguments": truncate(string(c.Arguments), 500),
 		})
 		started := time.Now()
-		res, err := t.Execute(context.Background(), c.Arguments)
+		res, err := runner.RunOne(context.Background(), toolpkg.Call{
+			Name:      toolName,
+			Arguments: c.Arguments,
+		})
 		if err != nil {
 			db.LogEvent(database, &toolEventID, db.EventToolCallFailed, map[string]any{
 				"tool_name":   toolName,
