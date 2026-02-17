@@ -41,8 +41,12 @@ worker running id=W000001 ...
 ### 2. 从宿主机发送测试消息
 
 ```bash
-scripts/send_test_message.sh '你好，请回复 OK'
+scripts/send_test_message.sh 'E2E-M3-T3-20260217-231629, extract timestamp from it and reply with parsed time'
 ```
+
+注意：
+- 不要只发送 `E2E-...` 这类纯标识字符串。
+- 测试消息必须包含明确任务指令，便于验证回复是否“语义正确”。
 
 ### 3. 查看容器日志
 
@@ -61,6 +65,7 @@ process task_id=1 chat_id=... text=你好，请回复 OK
 ### 4. 在 Telegram 中验证
 
 打开 Telegram，检查 `@autonous_bot` 的回复。
+应验证回复内容与测试指令匹配（例如回复中包含正确解析出的时间戳），而不只是“任意文本回复”。
 
 ## 环境变量参考
 

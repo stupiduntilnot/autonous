@@ -116,3 +116,12 @@ Agent 具备自我更新能力后，宿主机不再参与开发：
 - `AUTONOUS_DB_PATH`
 - `INSTANCE_ID` (用于 `supervisor`)
 - `PARENT_RUN_ID` (用于 `worker`)
+
+## 7. E2E 测试消息规范
+
+为确保端到端链路验证具备可判定性，项目所有 milestone 的 E2E 测试统一遵循以下规则：
+
+- 发送给 Agent 的测试消息必须是“可执行指令”，而非仅随机标识字符串。
+- 推荐格式：`<trace_id>, <explicit task instruction>`，例如：
+  - `E2E-M3-T3-20260217-231629, extract timestamp from it and reply with parsed time`
+- 验证标准不只看“有回复”，还应校验回复内容与指令语义一致（例如确实提取并解析了时间戳）。
