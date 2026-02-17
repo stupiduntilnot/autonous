@@ -111,6 +111,14 @@ func main() {
 	)); err != nil {
 		log.Fatalf("[worker] failed to register tool read: %v", err)
 	}
+	if err := registry.Register(toolpkg.NewWrite(
+		toolPolicy,
+		cfg.WorkspaceDir,
+		time.Duration(cfg.ToolTimeoutSeconds)*time.Second,
+		toolpkg.Limits{MaxLines: cfg.ToolMaxOutputLines, MaxBytes: cfg.ToolMaxOutputBytes},
+	)); err != nil {
+		log.Fatalf("[worker] failed to register tool write: %v", err)
+	}
 	toolRunner := toolpkg.NewRunner(registry)
 	if policy.MaxTurns < 2 {
 		policy.MaxTurns = 2
