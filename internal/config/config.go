@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -83,7 +84,7 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 	workerInstanceID := envOrDefault("WORKER_INSTANCE_ID", "W000000")
 	parentProcessID := int64(envIntOrDefault("PARENT_PROCESS_ID", 0))
 
-	return WorkerConfig{
+	cfg := WorkerConfig{
 		TelegramAPIBase:           fmt.Sprintf("https://api.telegram.org/bot%s", telegramToken),
 		Timeout:                   envIntOrDefault("TG_TIMEOUT", 30),
 		SleepSeconds:              envIntOrDefault("TG_SLEEP_SECONDS", 1),
@@ -113,7 +114,11 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		ToolMaxOutputBytes:        envIntOrDefault("AUTONOUS_TOOL_MAX_OUTPUT_BYTES", 51200),
 		ToolBashDenylist:          envOrDefault("AUTONOUS_TOOL_BASH_DENYLIST", ""),
 		ToolAllowedRoots:          envOrDefault("AUTONOUS_TOOL_ALLOWED_ROOTS", "/workspace,/state"),
-	}, nil
+	}
+	if err := validateWorkerConfig(&cfg); err != nil {
+		return WorkerConfig{}, err
+	}
+	return cfg, nil
 }
 
 func envOrDefault(key, fallback string) string {
@@ -141,4 +146,56 @@ func envBoolOrDefault(key string, fallback bool) bool {
 		return fallback
 	}
 	return v == "1" || strings.EqualFold(v, "true")
+}
+
+func validateWorkerConfig(cfg *WorkerConfig) error {
+	if cfg.ControlMaxTurns <= 0 {
+		return fmt.Errorf("AUTONOUS_CONTROL_MAX_TURNS must be > 0")
+	}
+	if cfg.ControlMaxWallTimeSeconds <= 0 {
+		return fmt.Errorf("AUTONOUS_CONTROL_MAX_WALL_TIME_SECONDS must be > 0")
+	}
+	if cfg.ControlMaxRetries < 0 {
+		return fmt.Errorf("AUTONOUS_CONTROL_MAX_RETRIES must be >= 0")
+	}
+	if cfg.ToolTimeoutSeconds <= 0 {
+		return fmt.Errorf("AUTONOUS_TOOL_TIMEOUT_SECONDS must be > 0")
+	}
+	if cfg.ToolMaxOutputLines <= 0 {
+		return fmt.Errorf("AUTONOUS_TOOL_MAX_OUTPUT_LINES must be > 0")
+	}
+	if cfg.ToolMaxOutputBytes <= 0 {
+		return fmt.Errorf("AUTONOUS_TOOL_MAX_OUTPUT_BYTES must be > 0")
+	}
+	roots, err := parseAllowedRoots(cfg.ToolAllowedRoots)
+	if err != nil {
+		return err
+	}
+	cfg.ToolAllowedRoots = strings.Join(roots, ",")
+	return nil
+}
+
+func parseAllowedRoots(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		root := strings.TrimSpace(p)
+		if root == "" {
+			continue
+		}
+		if !filepath.IsAbs(root) {
+			return nil, fmt.Errorf("AUTONOUS_TOOL_ALLOWED_ROOTS requires absolute paths: %s", root)
+		}
+		clean := filepath.Clean(root)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("AUTONOUS_TOOL_ALLOWED_ROOTS cannot be empty")
+	}
+	return out, nil
 }
