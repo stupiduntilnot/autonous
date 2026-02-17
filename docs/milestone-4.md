@@ -121,6 +121,7 @@ type Result struct {
 - 若 `tool_calls` 非空，worker 执行工具并把结果作为下一轮上下文输入模型。
 - 若 `tool_calls` 为空且 `final_answer` 非空，worker 发送最终回复并结束 task。
 - 若两者都为空，判为 `validation` 错误并失败。
+- 若某个 tool call 执行失败，失败信息必须作为结构化 tool result 回传模型并继续 loop（对齐 pi-mono）；不允许“失败即任务终止”的一次性 repair 模式。
 
 ## Safety Policy
 
@@ -169,7 +170,8 @@ AUTONOUS_TOOL_ALLOWED_ROOTS=/workspace,/state
    - 写 `tool_call.started`
    - 执行 tool
    - 写 `tool_call.completed` 或 `tool_call.failed`
-5. 将 tool result 追加到上下文，再次调用模型
+   - 无论成功失败，都产出 tool result 追加到上下文
+5. 将 tool results 追加到上下文，再次调用模型
 6. 直到得到 `final_answer`，发送消息并 `agent.completed`
 
 ### 2) 与 M3 的关系
@@ -178,6 +180,7 @@ AUTONOUS_TOOL_ALLOWED_ROOTS=/workspace,/state
 - 所有 tool round 时间累计到 `max_wall_time`
 - model token 继续累计用于 `max_tokens`
 - 无进展检测可复用（例如多轮重复同一 tool call）
+- 不引入额外的 repair-round 配置；tool error loop 的上限由上述 M3 控制项统一约束。
 
 ## 事件设计
 
@@ -295,13 +298,15 @@ M4 默认命令映射：
 
 - 模型返回单次 tool call，验证 `tool_call.started/completed`
 - 模型返回连续 tool call，验证 loop + `max_turns` 限制
-- 工具失败时验证 `tool_call.failed` + retry/circuit 联动
+- 工具失败时验证 `tool_call.failed` + error tool result 回传 + 下一轮修正继续执行
 
 ### E2E 测试
 
 - Telegram 下发明确指令（例如“读取某文件并总结”）验证真实链路
 - dummy provider 注入坏 tool request（非法参数、未知 tool）验证防护
 - 验证 `event-tree` 可重建 agent->turn->tool_call 层级
+- 综合多工具真实链路用例见：`docs/m4-e2e-multi-tool.md`
+- 回归场景：模型先调用错误工具参数（如读取尚未生成的输出文件）后，仍能在后续 tool rounds 修正并完成任务
 - Tool-by-tool E2E 覆盖矩阵：
   - `ls`: 列目录 + 分页/截断
   - `find`: 模式匹配 + depth/limit
@@ -382,3 +387,4 @@ M4 默认命令映射：
 - [DONE] `ls` 的真实 Telegram E2E（含明确 tool 任务指令）通过。
 - [DONE] 其余工具按“单工具单任务”逐个完成各自 E2E。
 - [DONE] dummy failure-injection 用例通过。
+- [DONE] 综合两轮 Telegram E2E（Round1 禁 `bash` + Round2 强制 `bash`，含失败后继续 loop）通过。
