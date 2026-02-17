@@ -50,17 +50,25 @@ type WorkerConfig struct {
 	OpenAIModel          string
 	SystemPrompt         string
 	DBPath               string
+	ModelProvider        string
+	Commander            string
+	DummyProviderScript  string
+	DummyCommanderScript string
+	DummySendScript      string
 }
 
 // LoadWorkerConfig reads worker configuration from environment variables.
 func LoadWorkerConfig() (WorkerConfig, error) {
+	modelProvider := envOrDefault("AUTONOUS_MODEL_PROVIDER", "openai")
+	commander := envOrDefault("AUTONOUS_COMMANDER", "telegram")
+
 	telegramToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-	if telegramToken == "" {
-		return WorkerConfig{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required in environment")
+	if commander == "telegram" && telegramToken == "" {
+		return WorkerConfig{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required in environment when AUTONOUS_COMMANDER=telegram")
 	}
 	openaiKey := os.Getenv("OPENAI_API_KEY")
-	if openaiKey == "" {
-		return WorkerConfig{}, fmt.Errorf("OPENAI_API_KEY is required in environment")
+	if modelProvider == "openai" && openaiKey == "" {
+		return WorkerConfig{}, fmt.Errorf("OPENAI_API_KEY is required in environment when AUTONOUS_MODEL_PROVIDER=openai")
 	}
 
 	workerInstanceID := envOrDefault("WORKER_INSTANCE_ID", "W000000")
@@ -82,6 +90,11 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		OpenAIModel:          envOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
 		SystemPrompt:         envOrDefault("WORKER_SYSTEM_PROMPT", "你是 autonous 的执行 Worker。回复简洁、准确；需要时给出可执行步骤。"),
 		DBPath:               envOrDefault("AUTONOUS_DB_PATH", "/state/agent.db"),
+		ModelProvider:        modelProvider,
+		Commander:            commander,
+		DummyProviderScript:  envOrDefault("AUTONOUS_DUMMY_PROVIDER_SCRIPT", "ok"),
+		DummyCommanderScript: envOrDefault("AUTONOUS_DUMMY_COMMANDER_SCRIPT", "ok"),
+		DummySendScript:      envOrDefault("AUTONOUS_DUMMY_COMMANDER_SEND_SCRIPT", "ok"),
 	}, nil
 }
 

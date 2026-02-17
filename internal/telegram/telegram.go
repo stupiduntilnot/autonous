@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	cmdpkg "github.com/stupiduntilnot/autonous/internal/commander"
 )
 
 // Client is a minimal Telegram Bot API client.
@@ -34,23 +36,9 @@ type Response struct {
 	Result json.RawMessage `json:"result"`
 }
 
-// Update represents a Telegram update.
-type Update struct {
-	UpdateID int64    `json:"update_id"`
-	Message  *Message `json:"message,omitempty"`
-}
-
-// Message represents a Telegram message.
-type Message struct {
-	Chat Chat    `json:"chat"`
-	Text *string `json:"text,omitempty"`
-	Date int64   `json:"date"`
-}
-
-// Chat represents a Telegram chat.
-type Chat struct {
-	ID int64 `json:"id"`
-}
+type Update = cmdpkg.Update
+type Message = cmdpkg.Message
+type Chat = cmdpkg.Chat
 
 // GetUpdates calls the getUpdates API.
 func (c *Client) GetUpdates(offset int64, timeout int) ([]Update, error) {

@@ -7,9 +7,12 @@ import (
 	"os"
 	"time"
 
+	cmdpkg "github.com/stupiduntilnot/autonous/internal/commander"
 	"github.com/stupiduntilnot/autonous/internal/config"
 	ctxpkg "github.com/stupiduntilnot/autonous/internal/context"
 	"github.com/stupiduntilnot/autonous/internal/db"
+	"github.com/stupiduntilnot/autonous/internal/dummy"
+	modelpkg "github.com/stupiduntilnot/autonous/internal/model"
 	"github.com/stupiduntilnot/autonous/internal/openai"
 	"github.com/stupiduntilnot/autonous/internal/telegram"
 )
@@ -43,8 +46,14 @@ func main() {
 		log.Printf("[worker] failed to log process.started: %v", err)
 	}
 
-	tgClient := telegram.NewClient(cfg.TelegramAPIBase, time.Duration(cfg.Timeout+20)*time.Second)
-	aiClient := openai.NewClient(cfg.OpenAIAPIKey, cfg.OpenAIChatCompURL, cfg.OpenAIModel, 120*time.Second)
+	commander, err := newCommander(&cfg)
+	if err != nil {
+		log.Fatalf("[worker] failed to init commander: %v", err)
+	}
+	modelProvider, err := newModelProvider(&cfg)
+	if err != nil {
+		log.Fatalf("[worker] failed to init model provider: %v", err)
+	}
 	ctxProvider := &ctxpkg.SQLiteProvider{DB: database}
 	ctxCompressor := &ctxpkg.SimpleCompressor{MaxMessages: cfg.HistoryWindow}
 	ctxAssembler := &ctxpkg.StandardAssembler{}
@@ -56,7 +65,7 @@ func main() {
 	}
 
 	if offset == 0 && cfg.DropPending {
-		bootstrapped, err := bootstrapOffset(tgClient, cfg.PendingWindowSeconds, cfg.PendingMaxMessages)
+		bootstrapped, err := bootstrapOffset(commander, cfg.PendingWindowSeconds, cfg.PendingMaxMessages)
 		if err != nil {
 			log.Printf("[worker] bootstrap offset error: %v", err)
 		} else {
@@ -74,7 +83,7 @@ func main() {
 			pollTimeout = 0
 		}
 
-		updates, err := tgClient.GetUpdates(offset, pollTimeout)
+		updates, err := commander.GetUpdates(offset, pollTimeout)
 		if err != nil {
 			log.Printf("getUpdates error: %v", err)
 			time.Sleep(time.Duration(cfg.SleepSeconds) * time.Second)
@@ -125,7 +134,7 @@ func main() {
 			"text":      truncate(task.Text, 1000),
 		})
 
-		processErr := processTask(database, tgClient, aiClient, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler)
+		processErr := processTask(database, commander, modelProvider, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler)
 		if processErr != nil {
 			msg := processErr.Error()
 			markTaskFailed(database, task.ID, msg)
@@ -134,7 +143,7 @@ func main() {
 				"error":   truncate(msg, 1000),
 			})
 			notify := fmt.Sprintf("任务处理失败：%s", truncate(msg, 600))
-			if err := tgClient.SendMessage(task.ChatID, notify); err != nil {
+			if err := commander.SendMessage(task.ChatID, notify); err != nil {
 				log.Printf("task %d failed to notify chat_id=%d: %v", task.ID, task.ChatID, err)
 			}
 			log.Printf("task %d failed: %s", task.ID, msg)
@@ -154,8 +163,8 @@ func main() {
 
 func processTask(
 	database *sql.DB,
-	tg *telegram.Client,
-	ai *openai.Client,
+	commander cmdpkg.Commander,
+	modelProvider modelpkg.Provider,
 	cfg *config.WorkerConfig,
 	task *queueTask,
 	agentEventID int64,
@@ -185,7 +194,7 @@ func processTask(
 	})
 
 	turnStart := time.Now()
-	resp, err := ai.ChatCompletion(messages)
+	resp, err := modelProvider.ChatCompletion(messages)
 	if err != nil {
 		return err
 	}
@@ -199,7 +208,7 @@ func processTask(
 		"output_tokens": resp.OutputTokens,
 	})
 
-	if err := tg.SendMessage(task.ChatID, resp.Content); err != nil {
+	if err := commander.SendMessage(task.ChatID, resp.Content); err != nil {
 		return err
 	}
 
@@ -289,8 +298,8 @@ func markTaskFailed(database *sql.DB, taskID int64, errMsg string) {
 		truncate(errMsg, 1000), taskID)
 }
 
-func bootstrapOffset(tg *telegram.Client, pendingWindowSeconds int64, pendingMaxMessages int) (int64, error) {
-	updates, err := tg.GetUpdates(0, 0)
+func bootstrapOffset(commander cmdpkg.Commander, pendingWindowSeconds int64, pendingMaxMessages int) (int64, error) {
+	updates, err := commander.GetUpdates(0, 0)
 	if err != nil {
 		return 0, err
 	}
@@ -301,7 +310,7 @@ func bootstrapOffset(tg *telegram.Client, pendingWindowSeconds int64, pendingMax
 	now := time.Now().Unix()
 	cutoff := now - pendingWindowSeconds
 
-	var inWindow []telegram.Update
+	var inWindow []cmdpkg.Update
 	for _, u := range updates {
 		if u.Message != nil && u.Message.Date >= cutoff {
 			inWindow = append(inWindow, u)
@@ -317,6 +326,28 @@ func bootstrapOffset(tg *telegram.Client, pendingWindowSeconds int64, pendingMax
 	}
 
 	return inWindow[0].UpdateID, nil
+}
+
+func newCommander(cfg *config.WorkerConfig) (cmdpkg.Commander, error) {
+	switch cfg.Commander {
+	case "telegram":
+		return telegram.NewClient(cfg.TelegramAPIBase, time.Duration(cfg.Timeout+20)*time.Second), nil
+	case "dummy":
+		return dummy.NewCommander(cfg.DummyCommanderScript, cfg.DummySendScript)
+	default:
+		return nil, fmt.Errorf("unsupported commander: %s", cfg.Commander)
+	}
+}
+
+func newModelProvider(cfg *config.WorkerConfig) (modelpkg.Provider, error) {
+	switch cfg.ModelProvider {
+	case "openai":
+		return openai.NewClient(cfg.OpenAIAPIKey, cfg.OpenAIChatCompURL, cfg.OpenAIModel, 120*time.Second), nil
+	case "dummy":
+		return dummy.NewProvider(cfg.OpenAIModel, cfg.DummyProviderScript)
+	default:
+		return nil, fmt.Errorf("unsupported model provider: %s", cfg.ModelProvider)
+	}
 }
 
 func truncate(s string, maxChars int) string {

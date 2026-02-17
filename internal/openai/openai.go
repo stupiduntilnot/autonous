@@ -10,6 +10,7 @@ import (
 	"time"
 
 	ctxpkg "github.com/stupiduntilnot/autonous/internal/context"
+	modelpkg "github.com/stupiduntilnot/autonous/internal/model"
 )
 
 // Client is a minimal OpenAI chat completions client.
@@ -32,12 +33,8 @@ func NewClient(apiKey, url, model string, timeout time.Duration) *Client {
 	}
 }
 
-// CompletionResponse is the common response model for all model adapters.
-type CompletionResponse struct {
-	Content      string
-	InputTokens  int
-	OutputTokens int
-}
+// CompletionResponse is re-exported for compatibility.
+type CompletionResponse = modelpkg.CompletionResponse
 
 // message is the internal JSON-serializable chat message for OpenAI API.
 type message struct {
@@ -66,7 +63,7 @@ type usage struct {
 }
 
 // ChatCompletion sends a chat completion request and returns a CompletionResponse.
-func (c *Client) ChatCompletion(messages []ctxpkg.Message) (CompletionResponse, error) {
+func (c *Client) ChatCompletion(messages []ctxpkg.Message) (modelpkg.CompletionResponse, error) {
 	internal := make([]message, len(messages))
 	for i, m := range messages {
 		internal[i] = message{Role: m.Role, Content: m.Content}
@@ -79,39 +76,39 @@ func (c *Client) ChatCompletion(messages []ctxpkg.Message) (CompletionResponse, 
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("failed to marshal openai request: %w", err)
+		return modelpkg.CompletionResponse{}, fmt.Errorf("failed to marshal openai request: %w", err)
 	}
 
 	req, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(payload))
 	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("failed to create openai request: %w", err)
+		return modelpkg.CompletionResponse{}, fmt.Errorf("failed to create openai request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("openai request failed: %w", err)
+		return modelpkg.CompletionResponse{}, fmt.Errorf("openai request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return CompletionResponse{}, fmt.Errorf("failed reading openai response: %w", err)
+		return modelpkg.CompletionResponse{}, fmt.Errorf("failed reading openai response: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		truncated := truncate(string(body), 400)
-		return CompletionResponse{}, fmt.Errorf("openai non-success status=%d body=%s", resp.StatusCode, truncated)
+		return modelpkg.CompletionResponse{}, fmt.Errorf("openai non-success status=%d body=%s", resp.StatusCode, truncated)
 	}
 
 	var parsed chatResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		truncated := truncate(string(body), 400)
-		return CompletionResponse{}, fmt.Errorf("failed to parse openai response: %s", truncated)
+		return modelpkg.CompletionResponse{}, fmt.Errorf("failed to parse openai response: %s", truncated)
 	}
 
-	result := CompletionResponse{}
+	result := modelpkg.CompletionResponse{}
 
 	// Extract token usage.
 	if parsed.Usage != nil {
