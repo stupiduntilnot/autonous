@@ -127,6 +127,14 @@ func main() {
 	)); err != nil {
 		log.Fatalf("[worker] failed to register tool edit: %v", err)
 	}
+	if err := registry.Register(toolpkg.NewBash(
+		toolPolicy,
+		cfg.WorkspaceDir,
+		time.Duration(cfg.ToolTimeoutSeconds)*time.Second,
+		toolpkg.Limits{MaxLines: cfg.ToolMaxOutputLines, MaxBytes: cfg.ToolMaxOutputBytes},
+	)); err != nil {
+		log.Fatalf("[worker] failed to register tool bash: %v", err)
+	}
 	toolRunner := toolpkg.NewRunner(registry)
 	if policy.MaxTurns < 2 {
 		policy.MaxTurns = 2

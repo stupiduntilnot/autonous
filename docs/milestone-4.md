@@ -373,12 +373,12 @@ M4 默认命令映射：
 
 ### 11. 工具实现：`bash`
 
-- [ ] 实现 `bash`。
-- [ ] 补齐 `bash` 单测（成功/失败/边界）与对应 E2E。
+- [DONE] 实现 `bash`。
+- [DONE] 补齐 `bash` 单测（成功/失败/边界）与对应 E2E。
 
 ### 12. 验收
 
 - [DONE] `go build ./... && go test ./...` 全通过。
 - [DONE] `ls` 的真实 Telegram E2E（含明确 tool 任务指令）通过。
-- [ ] 其余工具按“单工具单任务”逐个完成各自 E2E。
-- [ ] dummy failure-injection 用例通过。
+- [DONE] 其余工具按“单工具单任务”逐个完成各自 E2E。
+- [DONE] dummy failure-injection 用例通过。
