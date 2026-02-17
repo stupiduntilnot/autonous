@@ -399,53 +399,13 @@ func processTask(
 	}
 
 	finalReply := strings.TrimSpace(resp.Content)
+	lastAssistantContent := finalReply
 	toolEnvelope, hasToolProtocol := parseToolProtocol(finalReply)
 	if hasToolProtocol && len(toolEnvelope.ToolCalls) == 0 {
 		finalReply = strings.TrimSpace(toolEnvelope.FinalAnswer)
 	}
-	if hasToolProtocol && len(toolEnvelope.ToolCalls) > 0 {
-		toolResultsText, err := executeToolCalls(database, turnEventID, runner, toolEnvelope.ToolCalls)
-		if err != nil {
-			if !isRecoverableToolError(err) {
-				return err
-			}
-			if err := control.CheckTurnLimit(policy, usedTurns); err != nil {
-				recordLimitEvent(database, agentEventID, task.ID, err)
-				return err
-			}
-			usedTurns++
-			repairTurnEventID, _ := db.LogEvent(database, &agentEventID, db.EventTurnStarted, map[string]any{
-				"model_name": cfg.OpenAIModel,
-			})
-			repairPrompt := "Previous tool call failed: " + truncate(err.Error(), 600) + ". " +
-				"Regenerate strict JSON with corrected tool arguments. " +
-				"For ls, path must be \".\" or a path inside allowlist roots; never use \"/\". " +
-				"Return only JSON: {\"tool_calls\":[...],\"final_answer\":\"...\"}."
-			messages = append(messages,
-				ctxpkg.Message{Role: "assistant", Content: finalReply},
-				ctxpkg.Message{Role: "user", Content: repairPrompt},
-			)
-			repairStart := time.Now()
-			repairResp, repairErr := modelProvider.ChatCompletion(messages)
-			if repairErr != nil {
-				return repairErr
-			}
-			db.LogEvent(database, &agentEventID, db.EventTurnCompleted, map[string]any{
-				"model_name":    cfg.OpenAIModel,
-				"latency_ms":    time.Since(repairStart).Milliseconds(),
-				"input_tokens":  repairResp.InputTokens,
-				"output_tokens": repairResp.OutputTokens,
-			})
-			repaired, ok := parseToolProtocol(strings.TrimSpace(repairResp.Content))
-			if !ok || len(repaired.ToolCalls) == 0 {
-				return fmt.Errorf("validation: tool repair response missing tool_calls")
-			}
-			toolResultsText, err = executeToolCalls(database, repairTurnEventID, runner, repaired.ToolCalls)
-			if err != nil {
-				return err
-			}
-			finalReply = strings.TrimSpace(repairResp.Content)
-		}
+	for hasToolProtocol && len(toolEnvelope.ToolCalls) > 0 {
+		toolResultsText := executeToolCalls(database, turnEventID, runner, toolEnvelope.ToolCalls)
 		if err := control.CheckTurnLimit(policy, usedTurns); err != nil {
 			recordLimitEvent(database, agentEventID, task.ID, err)
 			return err
@@ -469,11 +429,66 @@ func processTask(
 			"input_tokens":  nextResp.InputTokens,
 			"output_tokens": nextResp.OutputTokens,
 		})
+		if err := control.CheckWallTime(policy, startedAt, time.Now()); err != nil {
+			recordLimitEvent(database, agentEventID, task.ID, err)
+			return err
+		}
+		totalTokens += nextResp.InputTokens + nextResp.OutputTokens
+		if err := control.CheckTokenLimit(policy, totalTokens); err != nil {
+			recordLimitEvent(database, agentEventID, task.ID, err)
+			return err
+		}
 		finalReply = strings.TrimSpace(nextResp.Content)
+		lastAssistantContent = finalReply
+		if parsed, ok := parseToolProtocol(finalReply); ok {
+			toolEnvelope = parsed
+			hasToolProtocol = true
+			if len(parsed.ToolCalls) == 0 {
+				finalReply = strings.TrimSpace(parsed.FinalAnswer)
+			}
+			continue
+		}
+		hasToolProtocol = false
+		_ = toolTurnEventID
+	}
+	if finalReply == "" && hasToolProtocol {
+		if err := control.CheckTurnLimit(policy, usedTurns); err != nil {
+			recordLimitEvent(database, agentEventID, task.ID, err)
+			return err
+		}
+		usedTurns++
+		lastTurnEventID, _ := db.LogEvent(database, &agentEventID, db.EventTurnStarted, map[string]any{
+			"model_name": cfg.OpenAIModel,
+		})
+		messages = append(messages,
+			ctxpkg.Message{Role: "assistant", Content: lastAssistantContent},
+			ctxpkg.Message{Role: "user", Content: "Previous final_answer was empty. Return strict JSON with tool_calls=[] and a non-empty final_answer."},
+		)
+		lastTurnStart := time.Now()
+		lastResp, lastErr := modelProvider.ChatCompletion(messages)
+		if lastErr != nil {
+			return lastErr
+		}
+		db.LogEvent(database, &agentEventID, db.EventTurnCompleted, map[string]any{
+			"model_name":    cfg.OpenAIModel,
+			"latency_ms":    time.Since(lastTurnStart).Milliseconds(),
+			"input_tokens":  lastResp.InputTokens,
+			"output_tokens": lastResp.OutputTokens,
+		})
+		if err := control.CheckWallTime(policy, startedAt, time.Now()); err != nil {
+			recordLimitEvent(database, agentEventID, task.ID, err)
+			return err
+		}
+		totalTokens += lastResp.InputTokens + lastResp.OutputTokens
+		if err := control.CheckTokenLimit(policy, totalTokens); err != nil {
+			recordLimitEvent(database, agentEventID, task.ID, err)
+			return err
+		}
+		finalReply = strings.TrimSpace(lastResp.Content)
 		if parsed, ok := parseToolProtocol(finalReply); ok {
 			finalReply = strings.TrimSpace(parsed.FinalAnswer)
 		}
-		_ = toolTurnEventID
+		_ = lastTurnEventID
 	}
 	if finalReply == "" {
 		return fmt.Errorf("validation: empty final reply")
@@ -523,8 +538,10 @@ func buildToolProtocolInstruction(registry *toolpkg.Registry, allowedRoots strin
 	return "You can use tools in this environment. " +
 		"Available tools: " + strings.Join(toolNames, ", ") + ". " +
 		"Allowed roots: " + roots + ". " +
-		"For ls/find, arguments must include a valid \"path\". " +
+		"For ls/find/read/write/edit, arguments must include a valid \"path\". " +
 		"Use \".\" for current directory; never use \"/\". " +
+		"For read, always set \"limit\" > 0 and optional \"offset\" >= 0. " +
+		"For write, always set non-empty \"content\". " +
 		"Always respond with strict JSON: " +
 		"{\"tool_calls\":[{\"name\":\"...\",\"arguments\":{...}}],\"final_answer\":\"...\"}. " +
 		"If a tool is needed, set final_answer to empty and fill tool_calls. " +
@@ -551,12 +568,23 @@ func injectToolInstruction(messages []ctxpkg.Message, instruction string) []ctxp
 	return out
 }
 
-func executeToolCalls(database *sql.DB, turnEventID int64, runner *toolpkg.Runner, calls []toolCall) (string, error) {
+func executeToolCalls(database *sql.DB, turnEventID int64, runner *toolpkg.Runner, calls []toolCall) string {
 	var out strings.Builder
 	for _, c := range calls {
 		toolName := strings.TrimSpace(c.Name)
 		if toolName == "" {
-			return "", fmt.Errorf("validation: empty tool name")
+			toolEventID, _ := db.LogEvent(database, &turnEventID, db.EventToolCallStarted, map[string]any{
+				"tool_name": "",
+				"arguments": truncate(string(c.Arguments), 500),
+			})
+			db.LogEvent(database, &toolEventID, db.EventToolCallFailed, map[string]any{
+				"tool_name":   "",
+				"error":       "validation: empty tool name",
+				"error_class": "validation",
+			})
+			out.WriteString("tool=\n")
+			out.WriteString("error:\nvalidation: empty tool name\n")
+			continue
 		}
 		toolEventID, _ := db.LogEvent(database, &turnEventID, db.EventToolCallStarted, map[string]any{
 			"tool_name": toolName,
@@ -573,7 +601,15 @@ func executeToolCalls(database *sql.DB, turnEventID int64, runner *toolpkg.Runne
 				"error":       truncate(err.Error(), 500),
 				"error_class": "tool_exec",
 			})
-			return "", err
+			out.WriteString("tool=" + toolName + "\n")
+			out.WriteString("error:\n" + truncate(err.Error(), 2000) + "\n")
+			if strings.TrimSpace(res.Stdout) != "" {
+				out.WriteString("stdout:\n" + res.Stdout + "\n")
+			}
+			if strings.TrimSpace(res.Stderr) != "" {
+				out.WriteString("stderr:\n" + res.Stderr + "\n")
+			}
+			continue
 		}
 		db.LogEvent(database, &toolEventID, db.EventToolCallDone, map[string]any{
 			"tool_name":       toolName,
@@ -590,18 +626,7 @@ func executeToolCalls(database *sql.DB, turnEventID int64, runner *toolpkg.Runne
 			out.WriteString("stderr:\n" + res.Stderr + "\n")
 		}
 	}
-	return out.String(), nil
-}
-
-func isRecoverableToolError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "validation") ||
-		strings.Contains(msg, "required") ||
-		strings.Contains(msg, "unknown tool") ||
-		strings.Contains(msg, "outside allowlist")
+	return out.String()
 }
 
 // --- DB helper functions ---

@@ -318,3 +318,76 @@ func TestProcessTask_ExtractsFinalAnswerFromJSON(t *testing.T) {
 		t.Fatalf("expected extracted final answer, got %q", commander.last)
 	}
 }
+
+func TestProcessTask_ToolFailureThenRecover(t *testing.T) {
+	database := testWorkerDB(t)
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "ok.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	commander := &captureCommander{}
+	provider := &seqProvider{
+		resps: []modelpkg.CompletionResponse{
+			{
+				Content:      "{\"tool_calls\":[{\"name\":\"ls\",\"arguments\":{\"path\":\"missing.txt\"}}],\"final_answer\":\"\"}",
+				InputTokens:  1,
+				OutputTokens: 1,
+			},
+			{
+				Content:      "{\"tool_calls\":[{\"name\":\"ls\",\"arguments\":{\"path\":\".\"}}],\"final_answer\":\"\"}",
+				InputTokens:  1,
+				OutputTokens: 1,
+			},
+			{
+				Content:      "{\"tool_calls\":[],\"final_answer\":\"recovered\"}",
+				InputTokens:  1,
+				OutputTokens: 1,
+			},
+		},
+	}
+	cfg := &config.WorkerConfig{
+		OpenAIModel:   "dummy",
+		SystemPrompt:  "sys",
+		HistoryWindow: 12,
+	}
+	task := &queueTask{ID: 5, ChatID: 1, UpdateID: 5, Text: "recover"}
+	ctxProvider := &ctxpkg.SQLiteProvider{DB: database}
+	ctxCompressor := &ctxpkg.SimpleCompressor{MaxMessages: 12}
+	ctxAssembler := &ctxpkg.StandardAssembler{}
+	policy := control.Policy{MaxTurns: 4, MaxWallTime: 120 * time.Second, MaxTokens: 1000, MaxRetries: 3}
+	agentEventID, err := db.LogEvent(database, nil, db.EventAgentStarted, map[string]any{"task_id": 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := toolpkg.NewPolicy(base, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := toolpkg.NewRegistry()
+	if err := reg.Register(toolpkg.NewLS(p, base, 2*time.Second, toolpkg.Limits{MaxLines: 100, MaxBytes: 4096})); err != nil {
+		t.Fatal(err)
+	}
+	runner := toolpkg.NewRunner(reg)
+
+	if err := processTask(database, commander, provider, cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, reg, runner); err != nil {
+		t.Fatalf("processTask failed: %v", err)
+	}
+	if commander.last != "recovered" {
+		t.Fatalf("unexpected final reply: %q", commander.last)
+	}
+	var failedCnt int
+	if err := database.QueryRow("SELECT COUNT(*) FROM events WHERE event_type = ?", db.EventToolCallFailed).Scan(&failedCnt); err != nil {
+		t.Fatal(err)
+	}
+	if failedCnt < 1 {
+		t.Fatalf("expected at least 1 tool_call.failed, got %d", failedCnt)
+	}
+	var completedCnt int
+	if err := database.QueryRow("SELECT COUNT(*) FROM events WHERE event_type = ?", db.EventToolCallDone).Scan(&completedCnt); err != nil {
+		t.Fatal(err)
+	}
+	if completedCnt < 1 {
+		t.Fatalf("expected at least 1 tool_call.completed, got %d", completedCnt)
+	}
+}

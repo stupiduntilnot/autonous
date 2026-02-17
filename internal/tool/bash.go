@@ -12,7 +12,9 @@ import (
 
 type BashInput struct {
 	Command string `json:"command"`
+	Cmd     string `json:"cmd"`
 	Cwd     string `json:"cwd"`
+	Workdir string `json:"workdir"`
 }
 
 type Bash struct {
@@ -47,7 +49,7 @@ func (t *Bash) Validate(raw json.RawMessage) error {
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return fmt.Errorf("invalid bash input: %w", err)
 	}
-	if strings.TrimSpace(in.Command) == "" {
+	if strings.TrimSpace(resolveBashCommand(in)) == "" {
 		return fmt.Errorf("bash.command is required")
 	}
 	return nil
@@ -60,12 +62,13 @@ func (t *Bash) Execute(ctx context.Context, raw json.RawMessage) (Result, error)
 	var in BashInput
 	_ = json.Unmarshal(raw, &in)
 
-	if t.Policy.IsBashDenied(in.Command) {
+	command := resolveBashCommand(in)
+	if t.Policy.IsBashDenied(command) {
 		err := fmt.Errorf("bash command denied by policy")
 		return Result{OK: false, ExitCode: 2, Stderr: err.Error()}, err
 	}
 
-	cwd := strings.TrimSpace(in.Cwd)
+	cwd := resolveBashWorkdir(in)
 	if cwd == "" {
 		cwd = "."
 	}
@@ -77,7 +80,7 @@ func (t *Bash) Execute(ctx context.Context, raw json.RawMessage) (Result, error)
 	toolCtx, cancel := context.WithTimeout(ctx, t.Timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(toolCtx, "bash", "-lc", in.Command)
+	cmd := exec.CommandContext(toolCtx, "bash", "-lc", command)
 	cmd.Dir = resolvedCwd
 
 	var stdout bytes.Buffer
@@ -109,4 +112,18 @@ func (t *Bash) Execute(ctx context.Context, raw json.RawMessage) (Result, error)
 		return result, fmt.Errorf("bash execution failed: %w", runErr)
 	}
 	return result, nil
+}
+
+func resolveBashCommand(in BashInput) string {
+	if s := strings.TrimSpace(in.Command); s != "" {
+		return s
+	}
+	return strings.TrimSpace(in.Cmd)
+}
+
+func resolveBashWorkdir(in BashInput) string {
+	if s := strings.TrimSpace(in.Cwd); s != "" {
+		return s
+	}
+	return strings.TrimSpace(in.Workdir)
 }

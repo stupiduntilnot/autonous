@@ -29,6 +29,27 @@ func TestBash_ExecuteSuccess(t *testing.T) {
 	}
 }
 
+func TestBash_ExecuteSuccessWithCmdAlias(t *testing.T) {
+	base := t.TempDir()
+	policy, err := NewPolicy(base, "rm -rf")
+	if err != nil {
+		t.Fatalf("policy err: %v", err)
+	}
+	bashTool := NewBash(policy, base, 2*time.Second, Limits{MaxLines: 100, MaxBytes: 4096})
+
+	raw, _ := json.Marshal(BashInput{Cmd: "echo ok-alias", Workdir: "."})
+	res, execErr := bashTool.Execute(context.Background(), raw)
+	if execErr != nil {
+		t.Fatalf("exec err: %v", execErr)
+	}
+	if !res.OK || res.ExitCode != 0 {
+		t.Fatalf("unexpected result ok=%v exit=%d stderr=%s", res.OK, res.ExitCode, res.Stderr)
+	}
+	if strings.TrimSpace(res.Stdout) != "ok-alias" {
+		t.Fatalf("unexpected stdout: %q", res.Stdout)
+	}
+}
+
 func TestBash_Denylist(t *testing.T) {
 	base := t.TempDir()
 	policy, err := NewPolicy(base, "rm -rf")
