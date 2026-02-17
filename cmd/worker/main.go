@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	cmdpkg "github.com/stupiduntilnot/autonous/internal/commander"
 	"github.com/stupiduntilnot/autonous/internal/config"
 	ctxpkg "github.com/stupiduntilnot/autonous/internal/context"
+	"github.com/stupiduntilnot/autonous/internal/control"
 	"github.com/stupiduntilnot/autonous/internal/db"
 	"github.com/stupiduntilnot/autonous/internal/dummy"
 	modelpkg "github.com/stupiduntilnot/autonous/internal/model"
@@ -39,8 +41,10 @@ func main() {
 		parentID = &cfg.ParentProcessID
 	}
 	workerEventID, err := db.LogEvent(database, parentID, db.EventProcessStarted, map[string]any{
-		"role": "worker",
-		"pid":  os.Getpid(),
+		"role":     "worker",
+		"pid":      os.Getpid(),
+		"provider": cfg.ModelProvider,
+		"source":   cfg.Commander,
 	})
 	if err != nil {
 		log.Printf("[worker] failed to log process.started: %v", err)
@@ -57,6 +61,12 @@ func main() {
 	ctxProvider := &ctxpkg.SQLiteProvider{DB: database}
 	ctxCompressor := &ctxpkg.SimpleCompressor{MaxMessages: cfg.HistoryWindow}
 	ctxAssembler := &ctxpkg.StandardAssembler{}
+	policy := control.Policy{
+		MaxTurns:    cfg.ControlMaxTurns,
+		MaxWallTime: time.Duration(cfg.ControlMaxWallTimeSeconds) * time.Second,
+		MaxRetries:  cfg.ControlMaxRetries,
+	}
+	circuit := control.NewCircuitBreaker(5, 30*time.Second)
 
 	// Derive offset from inbox, or bootstrap on first run.
 	offset, err := db.DeriveOffset(database)
@@ -73,13 +83,28 @@ func main() {
 		}
 	}
 
-	log.Printf("worker running id=%s model=%s", cfg.WorkerInstanceID, cfg.OpenAIModel)
+	log.Printf(
+		"worker running id=%s model=%s provider=%s source=%s",
+		cfg.WorkerInstanceID,
+		cfg.OpenAIModel,
+		cfg.ModelProvider,
+		cfg.Commander,
+	)
 
 	var handledCount uint64
 
 	for {
+		prevState := circuit.State()
+		if !circuit.Allow(time.Now()) {
+			time.Sleep(time.Duration(cfg.SleepSeconds) * time.Second)
+			continue
+		}
+		if prevState == control.CircuitOpen && circuit.State() == control.CircuitHalfOpen {
+			db.LogEvent(database, &workerEventID, db.EventCircuitHalfOpen, map[string]any{})
+		}
+
 		pollTimeout := cfg.Timeout
-		if hasRunnableTasks(database) {
+		if hasRunnableTasks(database, policy) {
 			pollTimeout = 0
 		}
 
@@ -112,7 +137,7 @@ func main() {
 			}
 		}
 
-		task, err := claimNextTask(database)
+		task, err := claimNextTask(database, policy)
 		if err != nil {
 			log.Printf("claim_next_task error: %v", err)
 			time.Sleep(time.Duration(cfg.SleepSeconds) * time.Second)
@@ -134,10 +159,36 @@ func main() {
 			"text":      truncate(task.Text, 1000),
 		})
 
-		processErr := processTask(database, commander, modelProvider, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler)
+		processErr := processTask(database, commander, modelProvider, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy)
 		if processErr != nil {
 			msg := processErr.Error()
 			markTaskFailed(database, task.ID, msg)
+			errClass := classifyError(processErr)
+			prevCircuit := circuit.State()
+			circuit.RecordFailure(errClass, time.Now())
+			if prevCircuit != control.CircuitOpen && circuit.State() == control.CircuitOpen {
+				db.LogEvent(database, &workerEventID, db.EventCircuitOpened, map[string]any{
+					"error_class":      errClass,
+					"threshold":        circuit.Threshold,
+					"cooldown_seconds": int(circuit.Cooldown.Seconds()),
+				})
+			}
+
+			if control.ShouldRetry(policy, int(task.Attempts)) {
+				backoff := control.RetryBackoffSeconds(int(task.Attempts))
+				db.LogEvent(database, &workerEventID, db.EventRetryScheduled, map[string]any{
+					"task_id":         task.ID,
+					"attempt":         task.Attempts,
+					"backoff_seconds": backoff,
+					"error_class":     errClass,
+				})
+			} else {
+				db.LogEvent(database, &workerEventID, db.EventRetryExhausted, map[string]any{
+					"task_id":          task.ID,
+					"attempts":         task.Attempts,
+					"last_error_class": errClass,
+				})
+			}
 			db.LogEvent(database, &workerEventID, db.EventAgentFailed, map[string]any{
 				"task_id": task.ID,
 				"error":   truncate(msg, 1000),
@@ -148,6 +199,13 @@ func main() {
 			}
 			log.Printf("task %d failed: %s", task.ID, msg)
 		} else {
+			prevCircuit := circuit.State()
+			circuit.RecordSuccess()
+			if prevCircuit != control.CircuitClosed {
+				db.LogEvent(database, &workerEventID, db.EventCircuitClosed, map[string]any{
+					"recovered": true,
+				})
+			}
 			markTaskDone(database, task.ID)
 			db.LogEvent(database, &workerEventID, db.EventAgentCompleted, map[string]any{
 				"task_id": task.ID,
@@ -171,7 +229,19 @@ func processTask(
 	provider ctxpkg.Provider,
 	compressor ctxpkg.Compressor,
 	assembler ctxpkg.Assembler,
+	policy control.Policy,
 ) error {
+	startedAt := time.Now()
+	usedTurns := 0
+	if err := control.CheckTurnLimit(policy, usedTurns); err != nil {
+		recordLimitEvent(database, agentEventID, task.ID, err)
+		return err
+	}
+	if err := control.CheckWallTime(policy, startedAt, time.Now()); err != nil {
+		recordLimitEvent(database, agentEventID, task.ID, err)
+		return err
+	}
+
 	history, err := provider.GetHistory(task.ChatID, cfg.HistoryWindow)
 	if err != nil {
 		return err
@@ -192,10 +262,15 @@ func processTask(
 	db.LogEvent(database, &agentEventID, db.EventTurnStarted, map[string]any{
 		"model_name": cfg.OpenAIModel,
 	})
+	usedTurns++
 
 	turnStart := time.Now()
 	resp, err := modelProvider.ChatCompletion(messages)
 	if err != nil {
+		return err
+	}
+	if err := control.CheckWallTime(policy, startedAt, time.Now()); err != nil {
+		recordLimitEvent(database, agentEventID, task.ID, err)
 		return err
 	}
 	latencyMs := time.Since(turnStart).Milliseconds()
@@ -225,10 +300,12 @@ func processTask(
 // --- DB helper functions ---
 
 type queueTask struct {
-	ID       int64
-	ChatID   int64
-	UpdateID int64
-	Text     string
+	ID        int64
+	ChatID    int64
+	UpdateID  int64
+	Text      string
+	Attempts  int64
+	UpdatedAt int64
 }
 
 func appendHistory(database *sql.DB, chatID int64, role, text string) {
@@ -247,13 +324,31 @@ func enqueueMessage(database *sql.DB, updateID, chatID int64, text string, messa
 	return affected > 0, nil
 }
 
-func hasRunnableTasks(database *sql.DB) bool {
+func hasRunnableTasks(database *sql.DB, policy control.Policy) bool {
 	var exists int64
-	err := database.QueryRow("SELECT 1 FROM inbox WHERE status IN ('queued', 'failed') ORDER BY id LIMIT 1").Scan(&exists)
-	return err == nil
+	err := database.QueryRow("SELECT 1 FROM inbox WHERE status = 'queued' ORDER BY id LIMIT 1").Scan(&exists)
+	if err == nil {
+		return true
+	}
+	rows, err := database.Query("SELECT attempts, updated_at FROM inbox WHERE status='failed' ORDER BY id LIMIT 100")
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	now := time.Now().Unix()
+	for rows.Next() {
+		var attempts, updatedAt int64
+		if scanErr := rows.Scan(&attempts, &updatedAt); scanErr != nil {
+			continue
+		}
+		if retryReady(attempts, updatedAt, now, policy) {
+			return true
+		}
+	}
+	return false
 }
 
-func claimNextTask(database *sql.DB) (*queueTask, error) {
+func claimNextTask(database *sql.DB, policy control.Policy) (*queueTask, error) {
 	tx, err := database.Begin()
 	if err != nil {
 		return nil, err
@@ -262,15 +357,37 @@ func claimNextTask(database *sql.DB) (*queueTask, error) {
 
 	var task queueTask
 	err = tx.QueryRow(
-		`SELECT id, chat_id, update_id, text FROM inbox
-		 WHERE status IN ('queued', 'failed')
-		 ORDER BY CASE status WHEN 'queued' THEN 0 ELSE 1 END, id
+		`SELECT id, chat_id, update_id, text, attempts, updated_at FROM inbox
+		 WHERE status = 'queued'
 		 LIMIT 1`,
-	).Scan(&task.ID, &task.ChatID, &task.UpdateID, &task.Text)
+	).Scan(&task.ID, &task.ChatID, &task.UpdateID, &task.Text, &task.Attempts, &task.UpdatedAt)
 	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
+		// Try failed tasks with retry window.
+		rows, qerr := tx.Query(
+			`SELECT id, chat_id, update_id, text, attempts, updated_at
+			 FROM inbox WHERE status='failed' ORDER BY id LIMIT 200`,
+		)
+		if qerr != nil {
+			return nil, qerr
+		}
+		defer rows.Close()
+		now := time.Now().Unix()
+		found := false
+		for rows.Next() {
+			var cand queueTask
+			if scanErr := rows.Scan(&cand.ID, &cand.ChatID, &cand.UpdateID, &cand.Text, &cand.Attempts, &cand.UpdatedAt); scanErr != nil {
+				continue
+			}
+			if retryReady(cand.Attempts, cand.UpdatedAt, now, policy) {
+				task = cand
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, nil
+		}
+	} else if err != nil {
 		return nil, err
 	}
 
@@ -286,6 +403,7 @@ func claimNextTask(database *sql.DB) (*queueTask, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	task.Attempts++
 	return &task, nil
 }
 
@@ -348,6 +466,71 @@ func newModelProvider(cfg *config.WorkerConfig) (modelpkg.Provider, error) {
 	default:
 		return nil, fmt.Errorf("unsupported model provider: %s", cfg.ModelProvider)
 	}
+}
+
+func retryReady(attempts int64, updatedAt int64, nowUnix int64, policy control.Policy) bool {
+	if attempts <= 0 {
+		return true
+	}
+	if !control.ShouldRetry(policy, int(attempts)) {
+		return false
+	}
+	backoff := int64(control.RetryBackoffSeconds(int(attempts)))
+	return nowUnix-updatedAt >= backoff
+}
+
+func classifyError(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	msg := err.Error()
+	switch {
+	case containsAny(msg, "telegram ", "commander"):
+		return "command_source_api"
+	case containsAny(msg, "openai ", "provider", "model"):
+		return "provider_api"
+	case containsAny(msg, "sqlite", "db", "database"):
+		return "db"
+	default:
+		return "unknown"
+	}
+}
+
+func containsAny(s string, parts ...string) bool {
+	for _, p := range parts {
+		if p != "" && stringContainsFold(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func stringContainsFold(s, substr string) bool {
+	return len(substr) == 0 || (len(s) >= len(substr) && (indexFold(s, substr) >= 0))
+}
+
+func indexFold(s, sep string) int {
+	ls := len(s)
+	lp := len(sep)
+	for i := 0; i+lp <= ls; i++ {
+		if strings.EqualFold(s[i:i+lp], sep) {
+			return i
+		}
+	}
+	return -1
+}
+
+func recordLimitEvent(database *sql.DB, agentEventID int64, taskID int64, err error) {
+	limitErr, ok := err.(*control.LimitError)
+	if !ok {
+		return
+	}
+	db.LogEvent(database, &agentEventID, db.EventControlLimitReached, map[string]any{
+		"task_id":    taskID,
+		"limit_type": string(limitErr.Type),
+		"value":      limitErr.Value,
+		"threshold":  limitErr.Threshold,
+	})
 }
 
 func truncate(s string, maxChars int) string {

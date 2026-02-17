@@ -35,26 +35,29 @@ func LoadSupervisorConfig() SupervisorConfig {
 
 // WorkerConfig holds configuration for the worker process.
 type WorkerConfig struct {
-	TelegramAPIBase      string
-	Timeout              int
-	SleepSeconds         int
-	DropPending          bool
-	PendingWindowSeconds int64
-	PendingMaxMessages   int
-	HistoryWindow        int
-	WorkerInstanceID     string
-	ParentProcessID      int64
-	SuicideEvery         uint64
-	OpenAIAPIKey         string
-	OpenAIChatCompURL    string
-	OpenAIModel          string
-	SystemPrompt         string
-	DBPath               string
-	ModelProvider        string
-	Commander            string
-	DummyProviderScript  string
-	DummyCommanderScript string
-	DummySendScript      string
+	TelegramAPIBase           string
+	Timeout                   int
+	SleepSeconds              int
+	DropPending               bool
+	PendingWindowSeconds      int64
+	PendingMaxMessages        int
+	HistoryWindow             int
+	WorkerInstanceID          string
+	ParentProcessID           int64
+	SuicideEvery              uint64
+	OpenAIAPIKey              string
+	OpenAIChatCompURL         string
+	OpenAIModel               string
+	SystemPrompt              string
+	DBPath                    string
+	ModelProvider             string
+	Commander                 string
+	DummyProviderScript       string
+	DummyCommanderScript      string
+	DummySendScript           string
+	ControlMaxTurns           int
+	ControlMaxWallTimeSeconds int
+	ControlMaxRetries         int
 }
 
 // LoadWorkerConfig reads worker configuration from environment variables.
@@ -75,26 +78,29 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 	parentProcessID := int64(envIntOrDefault("PARENT_PROCESS_ID", 0))
 
 	return WorkerConfig{
-		TelegramAPIBase:      fmt.Sprintf("https://api.telegram.org/bot%s", telegramToken),
-		Timeout:              envIntOrDefault("TG_TIMEOUT", 30),
-		SleepSeconds:         envIntOrDefault("TG_SLEEP_SECONDS", 1),
-		DropPending:          envBoolOrDefault("TG_DROP_PENDING", true),
-		PendingWindowSeconds: int64(envIntOrDefault("TG_PENDING_WINDOW_SECONDS", 600)),
-		PendingMaxMessages:   envIntOrDefault("TG_PENDING_MAX_MESSAGES", 50),
-		HistoryWindow:        envIntOrDefault("TG_HISTORY_WINDOW", 12),
-		WorkerInstanceID:     workerInstanceID,
-		ParentProcessID:      parentProcessID,
-		SuicideEvery:         uint64(envIntOrDefault("WORKER_SUICIDE_EVERY", 0)),
-		OpenAIAPIKey:         openaiKey,
-		OpenAIChatCompURL:    envOrDefault("OPENAI_CHAT_COMPLETIONS_URL", "https://api.openai.com/v1/chat/completions"),
-		OpenAIModel:          envOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
-		SystemPrompt:         envOrDefault("WORKER_SYSTEM_PROMPT", "你是 autonous 的执行 Worker。回复简洁、准确；需要时给出可执行步骤。"),
-		DBPath:               envOrDefault("AUTONOUS_DB_PATH", "/state/agent.db"),
-		ModelProvider:        modelProvider,
-		Commander:            commander,
-		DummyProviderScript:  envOrDefault("AUTONOUS_DUMMY_PROVIDER_SCRIPT", "ok"),
-		DummyCommanderScript: envOrDefault("AUTONOUS_DUMMY_COMMANDER_SCRIPT", "ok"),
-		DummySendScript:      envOrDefault("AUTONOUS_DUMMY_COMMANDER_SEND_SCRIPT", "ok"),
+		TelegramAPIBase:           fmt.Sprintf("https://api.telegram.org/bot%s", telegramToken),
+		Timeout:                   envIntOrDefault("TG_TIMEOUT", 30),
+		SleepSeconds:              envIntOrDefault("TG_SLEEP_SECONDS", 1),
+		DropPending:               envBoolOrDefault("TG_DROP_PENDING", true),
+		PendingWindowSeconds:      int64(envIntOrDefault("TG_PENDING_WINDOW_SECONDS", 600)),
+		PendingMaxMessages:        envIntOrDefault("TG_PENDING_MAX_MESSAGES", 50),
+		HistoryWindow:             envIntOrDefault("TG_HISTORY_WINDOW", 12),
+		WorkerInstanceID:          workerInstanceID,
+		ParentProcessID:           parentProcessID,
+		SuicideEvery:              uint64(envIntOrDefault("WORKER_SUICIDE_EVERY", 0)),
+		OpenAIAPIKey:              openaiKey,
+		OpenAIChatCompURL:         envOrDefault("OPENAI_CHAT_COMPLETIONS_URL", "https://api.openai.com/v1/chat/completions"),
+		OpenAIModel:               envOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
+		SystemPrompt:              envOrDefault("WORKER_SYSTEM_PROMPT", "你是 autonous 的执行 Worker。回复简洁、准确；需要时给出可执行步骤。"),
+		DBPath:                    envOrDefault("AUTONOUS_DB_PATH", "/state/agent.db"),
+		ModelProvider:             modelProvider,
+		Commander:                 commander,
+		DummyProviderScript:       envOrDefault("AUTONOUS_DUMMY_PROVIDER_SCRIPT", "ok"),
+		DummyCommanderScript:      envOrDefault("AUTONOUS_DUMMY_COMMANDER_SCRIPT", "ok"),
+		DummySendScript:           envOrDefault("AUTONOUS_DUMMY_COMMANDER_SEND_SCRIPT", "ok"),
+		ControlMaxTurns:           envIntOrDefault("AUTONOUS_CONTROL_MAX_TURNS", 1),
+		ControlMaxWallTimeSeconds: envIntOrDefault("AUTONOUS_CONTROL_MAX_WALL_TIME_SECONDS", 120),
+		ControlMaxRetries:         envIntOrDefault("AUTONOUS_CONTROL_MAX_RETRIES", 3),
 	}, nil
 }
 

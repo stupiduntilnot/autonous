@@ -22,16 +22,23 @@ const (
 
 // Event type constants — agent execution events
 const (
-	EventAgentStarted    = "agent.started"
-	EventAgentCompleted  = "agent.completed"
-	EventAgentFailed     = "agent.failed"
-	EventTurnStarted     = "turn.started"
-	EventTurnCompleted   = "turn.completed"
-	EventToolCallStarted = "tool_call.started"
-	EventToolCallDone    = "tool_call.completed"
-	EventToolCallFailed  = "tool_call.failed"
-	EventReplySent         = "reply.sent"
-	EventContextAssembled  = "context.assembled"
+	EventAgentStarted        = "agent.started"
+	EventAgentCompleted      = "agent.completed"
+	EventAgentFailed         = "agent.failed"
+	EventTurnStarted         = "turn.started"
+	EventTurnCompleted       = "turn.completed"
+	EventToolCallStarted     = "tool_call.started"
+	EventToolCallDone        = "tool_call.completed"
+	EventToolCallFailed      = "tool_call.failed"
+	EventReplySent           = "reply.sent"
+	EventContextAssembled    = "context.assembled"
+	EventControlLimitReached = "control.limit_reached"
+	EventRetryScheduled      = "retry.scheduled"
+	EventRetryExhausted      = "retry.exhausted"
+	EventCircuitOpened       = "circuit.opened"
+	EventCircuitHalfOpen     = "circuit.half_open"
+	EventCircuitClosed       = "circuit.closed"
+	EventProgressStalled     = "progress.stalled"
 )
 
 // OpenDB opens (or creates) a SQLite database at the given path, ensuring
