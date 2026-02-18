@@ -18,12 +18,15 @@ type SupervisorConfig struct {
 	CrashThreshold      int
 	StableRunSeconds    int
 	AutoRollback        bool
+	UpdateArtifactRoot  string
 }
 
 // LoadSupervisorConfig reads supervisor configuration from environment variables.
 func LoadSupervisorConfig() SupervisorConfig {
+	defaultWorkerBin := envOrDefault("WORKER_BIN", "/workspace/bin/worker")
+	activeBin := envOrDefault("AUTONOUS_UPDATE_ACTIVE_BIN", defaultWorkerBin)
 	return SupervisorConfig{
-		WorkerBin:           envOrDefault("WORKER_BIN", "/workspace/bin/worker"),
+		WorkerBin:           activeBin,
 		WorkspaceDir:        envOrDefault("WORKSPACE_DIR", "/workspace"),
 		StateDBPath:         envOrDefault("AUTONOUS_DB_PATH", "/state/agent.db"),
 		RestartDelaySeconds: envIntOrDefault("SUPERVISOR_RESTART_DELAY_SECONDS", 1),
@@ -31,6 +34,7 @@ func LoadSupervisorConfig() SupervisorConfig {
 		CrashThreshold:      envIntOrDefault("SUPERVISOR_CRASH_THRESHOLD", 3),
 		StableRunSeconds:    envIntOrDefault("SUPERVISOR_STABLE_RUN_SECONDS", 30),
 		AutoRollback:        envBoolOrDefault("SUPERVISOR_AUTO_ROLLBACK", false),
+		UpdateArtifactRoot:  envOrDefault("AUTONOUS_UPDATE_ARTIFACT_ROOT", "/state/artifacts"),
 	}
 }
 
@@ -65,6 +69,10 @@ type WorkerConfig struct {
 	ToolMaxOutputBytes        int
 	ToolBashDenylist          string
 	ToolAllowedRoots          string
+	UpdateArtifactRoot        string
+	UpdateTestCmd             string
+	UpdateSelfCheckCmd        string
+	UpdatePipelineTimeoutSec  int
 }
 
 // LoadWorkerConfig reads worker configuration from environment variables.
@@ -114,6 +122,10 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		ToolMaxOutputBytes:        envIntOrDefault("AUTONOUS_TOOL_MAX_OUTPUT_BYTES", 51200),
 		ToolBashDenylist:          envOrDefault("AUTONOUS_TOOL_BASH_DENYLIST", ""),
 		ToolAllowedRoots:          envOrDefault("AUTONOUS_TOOL_ALLOWED_ROOTS", "/workspace,/state"),
+		UpdateArtifactRoot:        envOrDefault("AUTONOUS_UPDATE_ARTIFACT_ROOT", "/state/artifacts"),
+		UpdateTestCmd:             envOrDefault("AUTONOUS_UPDATE_TEST_CMD", "go test ./..."),
+		UpdateSelfCheckCmd:        envOrDefault("AUTONOUS_UPDATE_SELF_CHECK_CMD", ""),
+		UpdatePipelineTimeoutSec:  envIntOrDefault("AUTONOUS_UPDATE_PIPELINE_TIMEOUT_SECONDS", 1800),
 	}
 	if err := validateWorkerConfig(&cfg); err != nil {
 		return WorkerConfig{}, err
@@ -166,6 +178,15 @@ func validateWorkerConfig(cfg *WorkerConfig) error {
 	}
 	if cfg.ToolMaxOutputBytes <= 0 {
 		return fmt.Errorf("AUTONOUS_TOOL_MAX_OUTPUT_BYTES must be > 0")
+	}
+	if cfg.UpdatePipelineTimeoutSec <= 0 {
+		return fmt.Errorf("AUTONOUS_UPDATE_PIPELINE_TIMEOUT_SECONDS must be > 0")
+	}
+	if strings.TrimSpace(cfg.UpdateArtifactRoot) == "" {
+		return fmt.Errorf("AUTONOUS_UPDATE_ARTIFACT_ROOT cannot be empty")
+	}
+	if !filepath.IsAbs(cfg.UpdateArtifactRoot) {
+		return fmt.Errorf("AUTONOUS_UPDATE_ARTIFACT_ROOT must be absolute")
 	}
 	roots, err := parseAllowedRoots(cfg.ToolAllowedRoots)
 	if err != nil {
