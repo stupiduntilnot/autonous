@@ -103,3 +103,79 @@ func TestDeployApprovedArtifact(t *testing.T) {
 		t.Fatalf("unexpected status: %s", artifact.Status)
 	}
 }
+
+func TestPromoteLatestDeployedArtifact(t *testing.T) {
+	database := testSupervisorDB(t)
+	if err := db.InsertArtifact(database, "tx-u1", "", "/state/artifacts/tx-u1/worker", db.ArtifactStatusDeployedUnstable); err != nil {
+		t.Fatal(err)
+	}
+	supEventID, err := db.LogEvent(database, nil, db.EventProcessStarted, map[string]any{"role": "supervisor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := promoteLatestDeployedArtifact(database, supEventID); err != nil {
+		t.Fatalf("promoteLatestDeployedArtifact failed: %v", err)
+	}
+	artifact, err := db.GetArtifactByTxID(database, "tx-u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Status != db.ArtifactStatusPromoted {
+		t.Fatalf("unexpected status: %s", artifact.Status)
+	}
+}
+
+func TestAttemptArtifactRollback(t *testing.T) {
+	database := testSupervisorDB(t)
+	baseDir := t.TempDir()
+	active := filepath.Join(baseDir, "worker.current")
+	baseBin := filepath.Join(baseDir, "base-worker")
+	newBin := filepath.Join(baseDir, "new-worker")
+	if err := os.WriteFile(baseBin, []byte("base"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newBin, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(newBin, active); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.InsertArtifact(database, "tx-base", "", baseBin, db.ArtifactStatusPromoted); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertArtifact(database, "tx-new", "tx-base", newBin, db.ArtifactStatusDeployedUnstable); err != nil {
+		t.Fatal(err)
+	}
+	supEventID, err := db.LogEvent(database, nil, db.EventProcessStarted, map[string]any{"role": "supervisor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.SupervisorConfig{WorkerBin: active}
+
+	ok, err := attemptArtifactRollback(cfg, database, supEventID)
+	if err != nil {
+		t.Fatalf("attemptArtifactRollback failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected rollback success")
+	}
+	resolved, err := filepath.EvalSymlinks(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(baseBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != want {
+		t.Fatalf("expected active to point to base binary, got %s", resolved)
+	}
+	artifact, err := db.GetArtifactByTxID(database, "tx-new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Status != db.ArtifactStatusRolledBack {
+		t.Fatalf("unexpected status: %s", artifact.Status)
+	}
+}

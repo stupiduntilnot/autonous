@@ -262,3 +262,58 @@ func TestLatestPromotedTxIDAndMetadataSetters(t *testing.T) {
 		t.Fatalf("unexpected self-check summary: %+v", artifact.SelfCheckSummary)
 	}
 }
+
+func TestLatestArtifactByStatusAndPromoteRollbackTransitions(t *testing.T) {
+	database := testDB(t)
+	if err := InsertArtifact(database, "tx-u1", "", "/state/artifacts/tx-u1/worker", ArtifactStatusDeployedUnstable); err != nil {
+		t.Fatal(err)
+	}
+	if err := InsertArtifact(database, "tx-u2", "", "/state/artifacts/tx-u2/worker", ArtifactStatusDeployedUnstable); err != nil {
+		t.Fatal(err)
+	}
+
+	latest, err := LatestArtifactByStatus(database, ArtifactStatusDeployedUnstable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest == nil || latest.TxID != "tx-u2" {
+		t.Fatalf("unexpected latest unstable artifact: %+v", latest)
+	}
+
+	ok, err := MarkArtifactPromoted(database, "tx-u2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected promoted transition success")
+	}
+	promoted, err := GetArtifactByTxID(database, "tx-u2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promoted.Status != ArtifactStatusPromoted {
+		t.Fatalf("unexpected status: %s", promoted.Status)
+	}
+
+	ok, err = MarkArtifactRollbackPending(database, "tx-u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected rollback_pending transition success")
+	}
+	ok, err = MarkArtifactRolledBack(database, "tx-u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected rolled_back transition success")
+	}
+	rb, err := GetArtifactByTxID(database, "tx-u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rb.Status != ArtifactStatusRolledBack {
+		t.Fatalf("unexpected status: %s", rb.Status)
+	}
+}

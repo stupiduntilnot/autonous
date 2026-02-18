@@ -118,14 +118,22 @@ func InsertArtifact(database *sql.DB, txID, baseTxID, binPath, status string) er
 }
 
 func GetArtifactByTxID(database *sql.DB, txID string) (*Artifact, error) {
+	return getArtifactByQuery(database, `WHERE tx_id = ?`, txID)
+}
+
+func LatestArtifactByStatus(database *sql.DB, status string) (*Artifact, error) {
+	return getArtifactByQuery(database, `WHERE status = ? ORDER BY id DESC LIMIT 1`, status)
+}
+
+func getArtifactByQuery(database *sql.DB, whereSQL string, args ...any) (*Artifact, error) {
 	row := database.QueryRow(
 		`SELECT id, tx_id, base_tx_id, bin_path, sha256, git_revision,
 		        build_started_at, build_finished_at, test_summary, self_check_summary,
 		        approval_chat_id, approval_message_id, deploy_started_at, deploy_finished_at,
 		        status, last_error, created_at, updated_at
 		   FROM artifacts
-		  WHERE tx_id = ?`,
-		txID,
+		  `+whereSQL,
+		args...,
 	)
 	var a Artifact
 	if err := row.Scan(
@@ -320,6 +328,18 @@ func SetArtifactSelfCheckSummary(database *sql.DB, txID, summary string) error {
 		nullIfEmpty(summary), txID,
 	)
 	return err
+}
+
+func MarkArtifactPromoted(database *sql.DB, txID string) (bool, error) {
+	return TransitionArtifactStatus(database, txID, ArtifactStatusDeployedUnstable, ArtifactStatusPromoted, "")
+}
+
+func MarkArtifactRollbackPending(database *sql.DB, txID string) (bool, error) {
+	return TransitionArtifactStatus(database, txID, ArtifactStatusDeployedUnstable, ArtifactStatusRollbackPending, "")
+}
+
+func MarkArtifactRolledBack(database *sql.DB, txID string) (bool, error) {
+	return TransitionArtifactStatus(database, txID, ArtifactStatusRollbackPending, ArtifactStatusRolledBack, "")
 }
 
 func truncateForDB(s string) string {

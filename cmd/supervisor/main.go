@@ -119,6 +119,9 @@ func main() {
 
 		stableThreshold := time.Duration(cfg.StableRunSeconds) * time.Second
 		if uptime >= stableThreshold {
+			if err := promoteLatestDeployedArtifact(database, supEventID); err != nil {
+				log.Printf("[supervisor] promote artifact failed: %v", err)
+			}
 			if rev := gitHeadRev(cfg.WorkspaceDir); rev != "" {
 				db.LogEvent(database, &supEventID, db.EventRevisionPromoted, map[string]any{"revision": rev})
 			}
@@ -140,13 +143,96 @@ func main() {
 					"threshold":      cfg.CrashThreshold,
 					"window_seconds": cfg.CrashWindowSeconds,
 				})
-				attemptRollback(&cfg, database, supEventID)
+				rolledBack, err := attemptArtifactRollback(&cfg, database, supEventID)
+				if err != nil {
+					log.Printf("[supervisor] artifact rollback failed: %v", err)
+				}
+				if !rolledBack {
+					attemptRollback(&cfg, database, supEventID)
+				}
 				crashTimes = nil
 			}
 		}
 
 		time.Sleep(time.Duration(cfg.RestartDelaySeconds) * time.Second)
 	}
+}
+
+func promoteLatestDeployedArtifact(database *sql.DB, supEventID int64) error {
+	artifact, err := db.LatestArtifactByStatus(database, db.ArtifactStatusDeployedUnstable)
+	if err != nil {
+		return err
+	}
+	if artifact == nil {
+		return nil
+	}
+	ok, err := db.MarkArtifactPromoted(database, artifact.TxID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	db.LogEvent(database, &supEventID, "update.promoted", map[string]any{
+		"tx_id":      artifact.TxID,
+		"base_tx_id": nullStringToString(artifact.BaseTxID),
+	})
+	return nil
+}
+
+func attemptArtifactRollback(cfg *config.SupervisorConfig, database *sql.DB, supEventID int64) (bool, error) {
+	artifact, err := db.LatestArtifactByStatus(database, db.ArtifactStatusDeployedUnstable)
+	if err != nil {
+		return false, err
+	}
+	if artifact == nil {
+		return false, nil
+	}
+	if !artifact.BaseTxID.Valid || strings.TrimSpace(artifact.BaseTxID.String) == "" {
+		return false, nil
+	}
+	ok, err := db.MarkArtifactRollbackPending(database, artifact.TxID)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	baseArtifact, err := db.GetArtifactByTxID(database, artifact.BaseTxID.String)
+	if err != nil {
+		return false, err
+	}
+	if err := atomicSwitchSymlink(cfg.WorkerBin, baseArtifact.BinPath); err != nil {
+		db.LogEvent(database, &supEventID, db.EventRollbackAttempted, map[string]any{
+			"target_tx_id": artifact.BaseTxID.String,
+			"success":      false,
+			"error":        err.Error(),
+		})
+		return false, err
+	}
+	ok, err = db.MarkArtifactRolledBack(database, artifact.TxID)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	db.LogEvent(database, &supEventID, db.EventRollbackAttempted, map[string]any{
+		"target_tx_id": artifact.BaseTxID.String,
+		"success":      true,
+	})
+	db.LogEvent(database, &supEventID, "update.rollback.completed", map[string]any{
+		"tx_id":      artifact.TxID,
+		"base_tx_id": artifact.BaseTxID.String,
+	})
+	return true, nil
+}
+
+func nullStringToString(v sql.NullString) string {
+	if !v.Valid {
+		return ""
+	}
+	return v.String
 }
 
 func deployApprovedArtifact(cfg *config.SupervisorConfig, database *sql.DB, supEventID int64) error {
