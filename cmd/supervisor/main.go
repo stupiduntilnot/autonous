@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/stupiduntilnot/autonous/internal/config"
@@ -93,12 +94,16 @@ func main() {
 			log.Fatalf("[supervisor] failed to start worker binary %s: %v", cfg.WorkerBin, err)
 		}
 
+		var workerExited atomic.Bool
+		startAutoPromoteWatcher(database, supEventID, startedAt, time.Duration(cfg.StableRunSeconds)*time.Second, &workerExited)
+
 		// Log worker.spawned.
 		db.LogEvent(database, &supEventID, db.EventWorkerSpawned, map[string]any{
 			"pid": cmd.Process.Pid,
 		})
 
 		err = cmd.Wait()
+		workerExited.Store(true)
 		uptime := time.Since(startedAt)
 
 		// Log worker.exited.
@@ -266,6 +271,26 @@ func nullStringToString(v sql.NullString) string {
 		return ""
 	}
 	return v.String
+}
+
+func startAutoPromoteWatcher(database *sql.DB, supEventID int64, startedAt time.Time, stableAfter time.Duration, workerExited *atomic.Bool) {
+	if stableAfter <= 0 {
+		stableAfter = 30 * time.Second
+	}
+	go func() {
+		timer := time.NewTimer(stableAfter)
+		defer timer.Stop()
+		<-timer.C
+		if workerExited.Load() {
+			return
+		}
+		if time.Since(startedAt) < stableAfter {
+			return
+		}
+		if err := promoteLatestDeployedArtifact(database, supEventID); err != nil {
+			log.Printf("[supervisor] auto promote failed: %v", err)
+		}
+	}()
 }
 
 func deployApprovedArtifact(cfg *config.SupervisorConfig, database *sql.DB, supEventID int64) error {

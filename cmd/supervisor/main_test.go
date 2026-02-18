@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stupiduntilnot/autonous/internal/config"
 	"github.com/stupiduntilnot/autonous/internal/db"
@@ -202,4 +204,30 @@ func TestEnsureBootstrapArtifactRecord(t *testing.T) {
 	if a.Status != db.ArtifactStatusPromoted {
 		t.Fatalf("unexpected status: %s", a.Status)
 	}
+}
+
+func TestStartAutoPromoteWatcher(t *testing.T) {
+	database := testSupervisorDB(t)
+	if err := db.InsertArtifact(database, "tx-auto-promote", "", "/state/artifacts/tx-auto-promote/worker", db.ArtifactStatusDeployedUnstable); err != nil {
+		t.Fatal(err)
+	}
+	supEventID, err := db.LogEvent(database, nil, db.EventProcessStarted, map[string]any{"role": "supervisor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exited atomic.Bool
+	startAutoPromoteWatcher(database, supEventID, time.Now(), 50*time.Millisecond, &exited)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		artifact, err := db.GetArtifactByTxID(database, "tx-auto-promote")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if artifact.Status == db.ArtifactStatusPromoted {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("expected auto promote to move status to promoted")
 }
