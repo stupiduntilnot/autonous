@@ -434,6 +434,57 @@ func TestRedactSecrets(t *testing.T) {
 	}
 }
 
+func TestProcessDirectCommand_ApproveSuccess(t *testing.T) {
+	database := testWorkerDB(t)
+	if err := db.InsertArtifact(database, "tx-approve-1", "base-0", "/state/artifacts/tx-approve-1/worker", db.ArtifactStatusStaged); err != nil {
+		t.Fatal(err)
+	}
+	task := &queueTask{ID: 10, ChatID: 1, Text: "approve tx-approve-1"}
+
+	handled, reply, shouldExit, err := processDirectCommand(database, task, 0)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if !shouldExit {
+		t.Fatal("expected shouldExit=true")
+	}
+	if !strings.Contains(reply, "approve 成功") {
+		t.Fatalf("unexpected reply: %s", reply)
+	}
+	got, err := db.GetArtifactByTxID(database, "tx-approve-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != db.ArtifactStatusApproved {
+		t.Fatalf("unexpected status: %s", got.Status)
+	}
+}
+
+func TestProcessDirectCommand_ApproveIgnoredWhenNotStaged(t *testing.T) {
+	database := testWorkerDB(t)
+	if err := db.InsertArtifact(database, "tx-approve-2", "", "/state/artifacts/tx-approve-2/worker", db.ArtifactStatusApproved); err != nil {
+		t.Fatal(err)
+	}
+	task := &queueTask{ID: 11, ChatID: 1, Text: "approve tx-approve-2"}
+
+	handled, reply, shouldExit, err := processDirectCommand(database, task, 0)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if shouldExit {
+		t.Fatal("expected shouldExit=false")
+	}
+	if !strings.Contains(reply, "approve 忽略") {
+		t.Fatalf("unexpected reply: %s", reply)
+	}
+}
+
 type errString string
 
 func (e errString) Error() string { return string(e) }

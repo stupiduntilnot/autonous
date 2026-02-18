@@ -249,6 +249,44 @@ func main() {
 			"text":      truncate(task.Text, 1000),
 		})
 
+		if handled, directReply, shouldExit, directErr := processDirectCommand(database, task, agentEventID); handled {
+			if directErr != nil {
+				msg := directErr.Error()
+				markTaskFailed(database, task.ID, msg)
+				db.LogEvent(database, &workerEventID, db.EventAgentFailed, map[string]any{
+					"task_id": task.ID,
+					"error":   truncate(msg, 1000),
+				})
+				notify := fmt.Sprintf("任务处理失败：%s", truncate(msg, 600))
+				if err := commander.SendMessage(task.ChatID, notify); err != nil {
+					log.Printf("task %d failed to notify chat_id=%d: %v", task.ID, task.ChatID, err)
+				}
+				log.Printf("task %d failed: %s", task.ID, msg)
+			} else {
+				if err := commander.SendMessage(task.ChatID, directReply); err != nil {
+					markTaskFailed(database, task.ID, err.Error())
+					db.LogEvent(database, &workerEventID, db.EventAgentFailed, map[string]any{
+						"task_id": task.ID,
+						"error":   truncate(err.Error(), 1000),
+					})
+					log.Printf("task %d failed to send direct reply: %v", task.ID, err)
+					continue
+				}
+				db.LogEvent(database, &agentEventID, db.EventReplySent, map[string]any{
+					"chat_id": task.ChatID,
+				})
+				markTaskDone(database, task.ID)
+				db.LogEvent(database, &workerEventID, db.EventAgentCompleted, map[string]any{
+					"task_id": task.ID,
+				})
+				appendHistory(database, task.ChatID, "user", task.Text)
+				appendHistory(database, task.ChatID, "assistant", directReply)
+				if shouldExit {
+					os.Exit(0)
+				}
+			}
+			continue
+		}
 		processErr := processTask(database, commander, modelProvider, &cfg, task, agentEventID, ctxProvider, ctxCompressor, ctxAssembler, policy, registry, toolRunner)
 		if processErr != nil {
 			msg := processErr.Error()
@@ -674,6 +712,8 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b([A-Za-z0-9_]*(TOKEN|SECRET|PASSWORD|API_KEY))\b\s*[:=]\s*["']?([^\s"']+)`),
 }
 
+var approveCommandPattern = regexp.MustCompile(`(?i)^\s*approve\s+([a-z0-9-]+)\s*$`)
+
 func redactSecrets(text string) (string, bool) {
 	out := text
 	redacted := false
@@ -739,6 +779,43 @@ func extractJSONObject(content string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func processDirectCommand(database *sql.DB, task *queueTask, agentEventID int64) (handled bool, reply string, shouldExit bool, err error) {
+	m := approveCommandPattern.FindStringSubmatch(strings.TrimSpace(task.Text))
+	if len(m) != 2 {
+		return false, "", false, nil
+	}
+	txID := strings.TrimSpace(strings.ToLower(m[1]))
+	if txID == "" {
+		return true, "approve 失败：tx_id 不能为空", false, nil
+	}
+
+	artifact, qerr := db.GetArtifactByTxID(database, txID)
+	if qerr != nil {
+		if errors.Is(qerr, db.ErrArtifactNotFound) {
+			return true, fmt.Sprintf("approve 失败：tx_id=%s 不存在", txID), false, nil
+		}
+		return true, "", false, qerr
+	}
+	if artifact.Status != db.ArtifactStatusStaged {
+		return true, fmt.Sprintf("approve 忽略：tx_id=%s 当前状态=%s", txID, artifact.Status), false, nil
+	}
+	ok, terr := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusStaged, db.ArtifactStatusApproved, "")
+	if terr != nil {
+		return true, "", false, terr
+	}
+	if !ok {
+		latest, lerr := db.GetArtifactByTxID(database, txID)
+		if lerr != nil {
+			return true, "", false, lerr
+		}
+		return true, fmt.Sprintf("approve 忽略：tx_id=%s 当前状态=%s", txID, latest.Status), false, nil
+	}
+	db.LogEvent(database, &agentEventID, "update.approved", map[string]any{
+		"tx_id": txID,
+	})
+	return true, fmt.Sprintf("approve 成功：tx_id=%s，worker 将退出以触发部署", txID), true, nil
 }
 
 // --- DB helper functions ---
