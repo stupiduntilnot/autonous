@@ -39,6 +39,10 @@ func main() {
 		log.Fatalf("[supervisor] failed to log process.started: %v", err)
 	}
 
+	if err := ensureBootstrapArtifactRecord(&cfg, database, supEventID); err != nil {
+		log.Printf("[supervisor] bootstrap artifact init failed: %v", err)
+	}
+
 	// M5 startup cleanup: normalize interrupted in-progress artifact states.
 	if cleaned, cerr := db.CleanupInProgressArtifacts(database); cerr != nil {
 		log.Printf("[supervisor] startup cleanup failed: %v", cerr)
@@ -156,6 +160,35 @@ func main() {
 
 		time.Sleep(time.Duration(cfg.RestartDelaySeconds) * time.Second)
 	}
+}
+
+func ensureBootstrapArtifactRecord(cfg *config.SupervisorConfig, database *sql.DB, supEventID int64) error {
+	latest, err := db.LatestPromotedTxID(database)
+	if err != nil {
+		return err
+	}
+	if latest != "" {
+		return nil
+	}
+
+	binPath := cfg.WorkerBin
+	if resolved, rerr := filepath.EvalSymlinks(cfg.WorkerBin); rerr == nil && strings.TrimSpace(resolved) != "" {
+		binPath = resolved
+	}
+	if strings.TrimSpace(binPath) == "" {
+		return fmt.Errorf("empty worker bin for bootstrap artifact")
+	}
+	if _, err := os.Stat(binPath); err != nil {
+		return fmt.Errorf("bootstrap binary missing at %s: %w", binPath, err)
+	}
+	if err := db.EnsureBootstrapPromotedArtifact(database, "bootstrap", binPath); err != nil {
+		return err
+	}
+	db.LogEvent(database, &supEventID, "update.promoted", map[string]any{
+		"tx_id":      "bootstrap",
+		"base_tx_id": "",
+	})
+	return nil
 }
 
 func promoteLatestDeployedArtifact(database *sql.DB, supEventID int64) error {

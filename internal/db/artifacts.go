@@ -117,6 +117,23 @@ func InsertArtifact(database *sql.DB, txID, baseTxID, binPath, status string) er
 	return err
 }
 
+func EnsureBootstrapPromotedArtifact(database *sql.DB, txID, binPath string) error {
+	txID = strings.TrimSpace(txID)
+	binPath = strings.TrimSpace(binPath)
+	if txID == "" {
+		return fmt.Errorf("tx_id cannot be empty")
+	}
+	if binPath == "" {
+		return fmt.Errorf("bin_path cannot be empty")
+	}
+	_, err := database.Exec(
+		`INSERT OR IGNORE INTO artifacts (tx_id, base_tx_id, bin_path, status)
+		 VALUES (?, NULL, ?, ?)`,
+		txID, binPath, ArtifactStatusPromoted,
+	)
+	return err
+}
+
 func GetArtifactByTxID(database *sql.DB, txID string) (*Artifact, error) {
 	return getArtifactByQuery(database, `WHERE tx_id = ?`, txID)
 }

@@ -179,3 +179,27 @@ func TestAttemptArtifactRollback(t *testing.T) {
 		t.Fatalf("unexpected status: %s", artifact.Status)
 	}
 }
+
+func TestEnsureBootstrapArtifactRecord(t *testing.T) {
+	database := testSupervisorDB(t)
+	base := t.TempDir()
+	worker := filepath.Join(base, "worker")
+	if err := os.WriteFile(worker, []byte("bootstrap"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	supEventID, err := db.LogEvent(database, nil, db.EventProcessStarted, map[string]any{"role": "supervisor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.SupervisorConfig{WorkerBin: worker}
+	if err := ensureBootstrapArtifactRecord(cfg, database, supEventID); err != nil {
+		t.Fatalf("ensureBootstrapArtifactRecord failed: %v", err)
+	}
+	a, err := db.GetArtifactByTxID(database, "bootstrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Status != db.ArtifactStatusPromoted {
+		t.Fatalf("unexpected status: %s", a.Status)
+	}
+}

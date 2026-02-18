@@ -317,3 +317,28 @@ func TestLatestArtifactByStatusAndPromoteRollbackTransitions(t *testing.T) {
 		t.Fatalf("unexpected status: %s", rb.Status)
 	}
 }
+
+func TestEnsureBootstrapPromotedArtifact(t *testing.T) {
+	database := testDB(t)
+	if err := EnsureBootstrapPromotedArtifact(database, "bootstrap", "/state/artifacts/bootstrap/worker"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := GetArtifactByTxID(database, "bootstrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ArtifactStatusPromoted {
+		t.Fatalf("unexpected status: %s", got.Status)
+	}
+	// idempotent
+	if err := EnsureBootstrapPromotedArtifact(database, "bootstrap", "/state/artifacts/bootstrap/worker"); err != nil {
+		t.Fatal(err)
+	}
+	var cnt int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM artifacts WHERE tx_id = ?`, "bootstrap").Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 1 {
+		t.Fatalf("expected single bootstrap artifact, got %d", cnt)
+	}
+}
