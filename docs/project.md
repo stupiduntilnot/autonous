@@ -58,7 +58,9 @@
 - **[Milestone 0: 基础结构](./milestone-0.md)**: 定义了已完成的 `MVP`。
 - **[Milestone 1: 可观测性计划](./milestone-1.md)**: 详细说明了统一事件日志系统的实现计划。
 - **[Milestone 2: Context Subsystem MVP](./milestone-2.md)**: Context Provider / Compressor / Assembler 三接口设计。
+- **[Milestone 3: Basic Control Plane](./milestone-3.md)**: 控制平面与 failure handling 设计。
 - **[Milestone 4: Tool Subsystem](./milestone-4.md)**: 工具子系统的详细设计与实施计划。
+- **[Milestone 5: Self-Update Transaction](./milestone-5.md)**: 自更新事务、artifact 部署与回滚设计。
 
 *一份用于指导开发辅助 `LLM` 的原则性文档位于 `AGENTS.md`。*
 

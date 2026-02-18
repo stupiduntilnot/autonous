@@ -345,4 +345,4 @@ if err := os.Rename(tmpLink, activeBin); err != nil { return err }
 
 - [DONE] `go build ./... && go test ./...` 全通过
 - [DONE] 成功/失败/回滚三类 E2E 全通过
-- [ ] 文档与实现一致（`milestones.md`、`project.md` 索引可追踪）
+- [DONE] 文档与实现一致（`milestones.md`、`project.md` 索引可追踪）
