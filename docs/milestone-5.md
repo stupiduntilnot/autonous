@@ -327,7 +327,7 @@ if err := os.Rename(tmpLink, activeBin); err != nil { return err }
 
 - [DONE] 新增 `artifacts` schema 与索引
 - [DONE] 实现 `artifacts` 状态转移仓储（含条件更新）
-- [ ] 将状态更新与 `events` 写入封装到同一事务
+- [DONE] 将状态更新与 `events` 写入封装到同一事务
 
 ### 2. Worker 流水线
 
