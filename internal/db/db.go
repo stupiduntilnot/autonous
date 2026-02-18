@@ -10,6 +10,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type sqlExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // Event type constants — infrastructure events
 const (
 	EventProcessStarted    = "process.started"
@@ -171,6 +175,15 @@ func DeriveOffset(database *sql.DB) (int64, error) {
 // LogEvent inserts an event into the events table and returns its auto-generated id.
 // parentID may be nil for root events. payload is serialized to JSON; nil payload stores NULL.
 func LogEvent(db *sql.DB, parentID *int64, eventType string, payload map[string]any) (int64, error) {
+	return logEventExec(db, parentID, eventType, payload)
+}
+
+// LogEventTx inserts an event within an existing SQL transaction.
+func LogEventTx(tx *sql.Tx, parentID *int64, eventType string, payload map[string]any) (int64, error) {
+	return logEventExec(tx, parentID, eventType, payload)
+}
+
+func logEventExec(exec sqlExecer, parentID *int64, eventType string, payload map[string]any) (int64, error) {
 	var payloadJSON any
 	if payload != nil {
 		data, err := json.Marshal(payload)
@@ -180,7 +193,7 @@ func LogEvent(db *sql.DB, parentID *int64, eventType string, payload map[string]
 		payloadJSON = string(data)
 	}
 
-	res, err := db.Exec(
+	res, err := exec.Exec(
 		`INSERT INTO events (parent_id, event_type, payload) VALUES (?, ?, ?)`,
 		parentID, eventType, payloadJSON,
 	)

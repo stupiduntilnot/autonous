@@ -2,6 +2,7 @@ package db
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -340,5 +341,64 @@ func TestEnsureBootstrapPromotedArtifact(t *testing.T) {
 	}
 	if cnt != 1 {
 		t.Fatalf("expected single bootstrap artifact, got %d", cnt)
+	}
+}
+
+func TestInsertArtifactWithEvent(t *testing.T) {
+	database := testDB(t)
+	parentID, err := LogEvent(database, nil, EventAgentStarted, map[string]any{"task_id": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{"tx_id": "tx-with-event", "bin_path": "/state/artifacts/tx-with-event/worker"}
+	if err := InsertArtifactWithEvent(
+		database, &parentID, "tx-with-event", "", "/state/artifacts/tx-with-event/worker", ArtifactStatusCreated,
+		"update.txn.created", payload,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var cnt int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM events WHERE event_type = ?`, "update.txn.created").Scan(&cnt); err != nil {
+		t.Fatal(err)
+	}
+	if cnt != 1 {
+		t.Fatalf("expected 1 update.txn.created event, got %d", cnt)
+	}
+}
+
+func TestTransitionArtifactStatusWithEvent(t *testing.T) {
+	database := testDB(t)
+	if err := InsertArtifact(database, "tx-transition", "", "/state/artifacts/tx-transition/worker", ArtifactStatusStaged); err != nil {
+		t.Fatal(err)
+	}
+	parentID, err := LogEvent(database, nil, EventAgentStarted, map[string]any{"task_id": 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := TransitionArtifactStatusWithEvent(
+		database, &parentID, "tx-transition", ArtifactStatusStaged, ArtifactStatusApproved, "",
+		"update.approved", map[string]any{"tx_id": "tx-transition"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected transition success")
+	}
+	a, err := GetArtifactByTxID(database, "tx-transition")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Status != ArtifactStatusApproved {
+		t.Fatalf("unexpected status: %s", a.Status)
+	}
+
+	var payload string
+	if err := database.QueryRow(`SELECT payload FROM events WHERE event_type = ? ORDER BY id DESC LIMIT 1`, "update.approved").Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(payload, "tx-transition") {
+		t.Fatalf("unexpected event payload: %s", payload)
 	}
 }

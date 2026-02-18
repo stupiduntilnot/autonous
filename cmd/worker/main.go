@@ -819,7 +819,10 @@ func processDirectCommand(database *sql.DB, cfg *config.WorkerConfig, task *queu
 	if artifact.Status != db.ArtifactStatusStaged {
 		return true, fmt.Sprintf("approve 忽略：tx_id=%s 当前状态=%s", txID, artifact.Status), false, nil
 	}
-	ok, terr := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusStaged, db.ArtifactStatusApproved, "")
+	ok, terr := db.TransitionArtifactStatusWithEvent(
+		database, &agentEventID, txID, db.ArtifactStatusStaged, db.ArtifactStatusApproved, "",
+		"update.approved", map[string]any{"tx_id": txID},
+	)
 	if terr != nil {
 		return true, "", false, terr
 	}
@@ -830,9 +833,6 @@ func processDirectCommand(database *sql.DB, cfg *config.WorkerConfig, task *queu
 		}
 		return true, fmt.Sprintf("approve 忽略：tx_id=%s 当前状态=%s", txID, latest.Status), false, nil
 	}
-	db.LogEvent(database, &agentEventID, "update.approved", map[string]any{
-		"tx_id": txID,
-	})
 	return true, fmt.Sprintf("approve 成功：tx_id=%s，worker 将退出以触发部署", txID), true, nil
 }
 
@@ -845,25 +845,31 @@ func runUpdateStagePipeline(database *sql.DB, cfg *config.WorkerConfig, txID str
 	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
 		return "", err
 	}
-	if err := db.InsertArtifact(database, txID, baseTxID, binPath, db.ArtifactStatusCreated); err != nil {
+	if err := db.InsertArtifactWithEvent(
+		database, &agentEventID, txID, baseTxID, binPath, db.ArtifactStatusCreated,
+		"update.txn.created", map[string]any{
+			"tx_id":      txID,
+			"base_tx_id": baseTxID,
+			"bin_path":   binPath,
+		},
+	); err != nil {
 		return "", err
 	}
-	db.LogEvent(database, &agentEventID, "update.txn.created", map[string]any{
-		"tx_id":      txID,
-		"base_tx_id": baseTxID,
-		"bin_path":   binPath,
-	})
 
-	if ok, err := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusCreated, db.ArtifactStatusBuilding, ""); err != nil {
+	if ok, err := db.TransitionArtifactStatusWithEvent(
+		database, &agentEventID, txID, db.ArtifactStatusCreated, db.ArtifactStatusBuilding, "",
+		"update.build.started", map[string]any{"tx_id": txID},
+	); err != nil {
 		return "", err
 	} else if !ok {
 		return "", fmt.Errorf("failed to enter building: tx_id=%s", txID)
 	}
-	db.LogEvent(database, &agentEventID, "update.build.started", map[string]any{"tx_id": txID})
 
 	if err := runCommandWithTimeout(cfg.WorkspaceDir, cfg.UpdatePipelineTimeoutSec, "go", "build", "-o", binPath, "./cmd/worker"); err != nil {
-		_, _ = db.TransitionArtifactStatus(database, txID, db.ArtifactStatusBuilding, db.ArtifactStatusBuildFailed, err.Error())
-		db.LogEvent(database, &agentEventID, "update.build.failed", map[string]any{"tx_id": txID, "error": truncate(err.Error(), 1000)})
+		_, _ = db.TransitionArtifactStatusWithEvent(
+			database, &agentEventID, txID, db.ArtifactStatusBuilding, db.ArtifactStatusBuildFailed, err.Error(),
+			"update.build.failed", map[string]any{"tx_id": txID, "error": truncate(err.Error(), 1000)},
+		)
 		return "", err
 	}
 	sha, err := fileSHA256Hex(binPath)
@@ -877,32 +883,40 @@ func runUpdateStagePipeline(database *sql.DB, cfg *config.WorkerConfig, txID str
 	}
 	db.LogEvent(database, &agentEventID, "update.build.completed", map[string]any{"tx_id": txID, "sha256": sha, "git_revision": rev})
 
-	if ok, err := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusBuilding, db.ArtifactStatusTesting, ""); err != nil {
+	if ok, err := db.TransitionArtifactStatusWithEvent(
+		database, &agentEventID, txID, db.ArtifactStatusBuilding, db.ArtifactStatusTesting, "",
+		"update.test.started", map[string]any{"tx_id": txID, "cmd": cfg.UpdateTestCmd},
+	); err != nil {
 		return "", err
 	} else if !ok {
 		return "", fmt.Errorf("failed to enter testing: tx_id=%s", txID)
 	}
-	db.LogEvent(database, &agentEventID, "update.test.started", map[string]any{"tx_id": txID, "cmd": cfg.UpdateTestCmd})
 	if err := runShellCommandWithTimeout(cfg.WorkspaceDir, cfg.UpdatePipelineTimeoutSec, cfg.UpdateTestCmd); err != nil {
 		_ = db.SetArtifactTestSummary(database, txID, truncate("failed: "+err.Error(), 2000))
-		_, _ = db.TransitionArtifactStatus(database, txID, db.ArtifactStatusTesting, db.ArtifactStatusTestFailed, err.Error())
-		db.LogEvent(database, &agentEventID, "update.test.failed", map[string]any{"tx_id": txID, "error": truncate(err.Error(), 1000)})
+		_, _ = db.TransitionArtifactStatusWithEvent(
+			database, &agentEventID, txID, db.ArtifactStatusTesting, db.ArtifactStatusTestFailed, err.Error(),
+			"update.test.failed", map[string]any{"tx_id": txID, "error": truncate(err.Error(), 1000)},
+		)
 		return "", err
 	}
 	_ = db.SetArtifactTestSummary(database, txID, "ok")
 	db.LogEvent(database, &agentEventID, "update.test.completed", map[string]any{"tx_id": txID})
 
-	if ok, err := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusTesting, db.ArtifactStatusSelfChecking, ""); err != nil {
+	if ok, err := db.TransitionArtifactStatusWithEvent(
+		database, &agentEventID, txID, db.ArtifactStatusTesting, db.ArtifactStatusSelfChecking, "",
+		"update.self_check.started", map[string]any{"tx_id": txID, "cmd": cfg.UpdateSelfCheckCmd},
+	); err != nil {
 		return "", err
 	} else if !ok {
 		return "", fmt.Errorf("failed to enter self_checking: tx_id=%s", txID)
 	}
-	db.LogEvent(database, &agentEventID, "update.self_check.started", map[string]any{"tx_id": txID, "cmd": cfg.UpdateSelfCheckCmd})
 	if strings.TrimSpace(cfg.UpdateSelfCheckCmd) != "" {
 		if err := runShellCommandWithTimeout(cfg.WorkspaceDir, cfg.UpdatePipelineTimeoutSec, cfg.UpdateSelfCheckCmd); err != nil {
 			_ = db.SetArtifactSelfCheckSummary(database, txID, truncate("failed: "+err.Error(), 2000))
-			_, _ = db.TransitionArtifactStatus(database, txID, db.ArtifactStatusSelfChecking, db.ArtifactStatusSelfCheckFailed, err.Error())
-			db.LogEvent(database, &agentEventID, "update.self_check.failed", map[string]any{"tx_id": txID, "error": truncate(err.Error(), 1000)})
+			_, _ = db.TransitionArtifactStatusWithEvent(
+				database, &agentEventID, txID, db.ArtifactStatusSelfChecking, db.ArtifactStatusSelfCheckFailed, err.Error(),
+				"update.self_check.failed", map[string]any{"tx_id": txID, "error": truncate(err.Error(), 1000)},
+			)
 			return "", err
 		}
 		_ = db.SetArtifactSelfCheckSummary(database, txID, "ok")
@@ -911,12 +925,14 @@ func runUpdateStagePipeline(database *sql.DB, cfg *config.WorkerConfig, txID str
 	}
 	db.LogEvent(database, &agentEventID, "update.self_check.completed", map[string]any{"tx_id": txID})
 
-	if ok, err := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusSelfChecking, db.ArtifactStatusStaged, ""); err != nil {
+	if ok, err := db.TransitionArtifactStatusWithEvent(
+		database, &agentEventID, txID, db.ArtifactStatusSelfChecking, db.ArtifactStatusStaged, "",
+		"update.artifact.staged", map[string]any{"tx_id": txID, "sha256": sha},
+	); err != nil {
 		return "", err
 	} else if !ok {
 		return "", fmt.Errorf("failed to enter staged: tx_id=%s", txID)
 	}
-	db.LogEvent(database, &agentEventID, "update.artifact.staged", map[string]any{"tx_id": txID, "sha256": sha})
 	return fmt.Sprintf("update stage 成功：tx_id=%s sha256=%s", txID, sha), nil
 }
 

@@ -117,6 +117,38 @@ func InsertArtifact(database *sql.DB, txID, baseTxID, binPath, status string) er
 	return err
 }
 
+func InsertArtifactWithEvent(database *sql.DB, parentID *int64, txID, baseTxID, binPath, status, eventType string, payload map[string]any) error {
+	txID = strings.TrimSpace(txID)
+	binPath = strings.TrimSpace(binPath)
+	status = strings.TrimSpace(status)
+	if txID == "" {
+		return fmt.Errorf("tx_id cannot be empty")
+	}
+	if binPath == "" {
+		return fmt.Errorf("bin_path cannot be empty")
+	}
+	if status == "" {
+		return fmt.Errorf("status cannot be empty")
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT INTO artifacts (tx_id, base_tx_id, bin_path, status) VALUES (?, ?, ?, ?)`,
+		txID, nullIfEmpty(baseTxID), binPath, status,
+	); err != nil {
+		return err
+	}
+	if strings.TrimSpace(eventType) != "" {
+		if _, err := LogEventTx(tx, parentID, eventType, payload); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func EnsureBootstrapPromotedArtifact(database *sql.DB, txID, binPath string) error {
 	txID = strings.TrimSpace(txID)
 	binPath = strings.TrimSpace(binPath)
@@ -186,6 +218,42 @@ func TransitionArtifactStatus(database *sql.DB, txID, fromStatus, toStatus, last
 		return false, err
 	}
 	return affected > 0, nil
+}
+
+func TransitionArtifactStatusWithEvent(database *sql.DB, parentID *int64, txID, fromStatus, toStatus, lastError, eventType string, payload map[string]any) (bool, error) {
+	if !IsValidArtifactStatusTransition(fromStatus, toStatus) {
+		return false, fmt.Errorf("%w: %s -> %s", ErrInvalidStatusTransit, fromStatus, toStatus)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
+		`UPDATE artifacts
+		    SET status = ?, last_error = ?, updated_at = unixepoch()
+		  WHERE tx_id = ? AND status = ?`,
+		toStatus, nullIfEmpty(lastError), txID, fromStatus,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	if strings.TrimSpace(eventType) != "" {
+		if _, err := LogEventTx(tx, parentID, eventType, payload); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func CleanupInProgressArtifacts(database *sql.DB) (int64, error) {
