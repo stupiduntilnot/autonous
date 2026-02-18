@@ -837,6 +837,17 @@ func processDirectCommand(database *sql.DB, cfg *config.WorkerConfig, task *queu
 }
 
 func runUpdateStagePipeline(database *sql.DB, cfg *config.WorkerConfig, txID string, agentEventID int64) (string, error) {
+	if existing, err := db.GetArtifactByTxID(database, txID); err == nil {
+		switch existing.Status {
+		case db.ArtifactStatusBuildFailed, db.ArtifactStatusTestFailed, db.ArtifactStatusSelfCheckFailed, db.ArtifactStatusDeployFailed, db.ArtifactStatusCancelled, db.ArtifactStatusRolledBack:
+			return "", fmt.Errorf("tx_id=%s 已存在且状态=%s，请使用新的 tx_id", txID, existing.Status)
+		default:
+			return fmt.Sprintf("update stage 忽略：tx_id=%s 当前状态=%s", txID, existing.Status), nil
+		}
+	} else if !errors.Is(err, db.ErrArtifactNotFound) {
+		return "", err
+	}
+
 	baseTxID, err := db.LatestPromotedTxID(database)
 	if err != nil {
 		return "", err

@@ -528,6 +528,35 @@ func TestProcessDirectCommand_UpdateStage(t *testing.T) {
 	}
 }
 
+func TestProcessDirectCommand_UpdateStageDuplicateTxID(t *testing.T) {
+	database := testWorkerDB(t)
+	if err := db.InsertArtifact(database, "tx-dup-1", "", "/state/artifacts/tx-dup-1/worker", db.ArtifactStatusStaged); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.WorkerConfig{
+		WorkspaceDir:             t.TempDir(),
+		UpdateArtifactRoot:       t.TempDir(),
+		UpdateTestCmd:            "true",
+		UpdateSelfCheckCmd:       "",
+		UpdatePipelineTimeoutSec: 30,
+	}
+	task := &queueTask{ID: 13, ChatID: 1, Text: "update stage tx-dup-1"}
+
+	handled, reply, shouldExit, err := processDirectCommand(database, cfg, task, 0)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if shouldExit {
+		t.Fatal("expected shouldExit=false")
+	}
+	if !strings.Contains(reply, "update stage 忽略") {
+		t.Fatalf("unexpected reply: %s", reply)
+	}
+}
+
 type errString string
 
 func (e errString) Error() string { return string(e) }
