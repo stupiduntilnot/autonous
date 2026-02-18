@@ -35,6 +35,16 @@ func main() {
 		log.Fatalf("[supervisor] failed to log process.started: %v", err)
 	}
 
+	// M5 startup cleanup: normalize interrupted in-progress artifact states.
+	if cleaned, cerr := db.CleanupInProgressArtifacts(database); cerr != nil {
+		log.Printf("[supervisor] startup cleanup failed: %v", cerr)
+	} else if cleaned > 0 {
+		log.Printf("[supervisor] startup cleanup updated %d in-progress artifacts", cleaned)
+		db.LogEvent(database, &supEventID, "update.cleanup.completed", map[string]any{
+			"affected_rows": cleaned,
+		})
+	}
+
 	// Initialize current_good_rev if no revision.promoted event exists.
 	if rev := gitHeadRev(cfg.WorkspaceDir); rev != "" {
 		existing, _ := db.CurrentGoodRev(database)
