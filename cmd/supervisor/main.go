@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -215,6 +217,7 @@ func promoteLatestDeployedArtifact(database *sql.DB, supEventID int64) error {
 		"tx_id":      artifact.TxID,
 		"base_tx_id": nullStringToString(artifact.BaseTxID),
 	})
+	notifyArtifactStatus("promoted", artifact)
 	return nil
 }
 
@@ -263,6 +266,7 @@ func attemptArtifactRollback(cfg *config.SupervisorConfig, database *sql.DB, sup
 		"tx_id":      artifact.TxID,
 		"base_tx_id": artifact.BaseTxID.String,
 	})
+	notifyArtifactStatus("rolled_back", artifact)
 	return true, nil
 }
 
@@ -347,6 +351,7 @@ func deployApprovedArtifact(cfg *config.SupervisorConfig, database *sql.DB, supE
 	db.LogEvent(database, &supEventID, "update.deploy.completed", map[string]any{
 		"tx_id": artifact.TxID,
 	})
+	notifyArtifactStatus("deployed_unstable", artifact)
 	log.Printf("[supervisor] deployed approved artifact tx_id=%s", artifact.TxID)
 	return nil
 }
@@ -379,6 +384,40 @@ func atomicSwitchSymlink(activeBin, newBinPath string) error {
 	if err := os.Rename(tmpLink, activeBin); err != nil {
 		_ = os.Remove(tmpLink)
 		return err
+	}
+	return nil
+}
+
+func notifyArtifactStatus(status string, artifact *db.Artifact) {
+	if artifact == nil || !artifact.ApprovalChatID.Valid {
+		return
+	}
+	token := strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN"))
+	if token == "" {
+		return
+	}
+	text := fmt.Sprintf("update %s: tx_id=%s", status, artifact.TxID)
+	if artifact.BaseTxID.Valid && strings.TrimSpace(artifact.BaseTxID.String) != "" {
+		text += " base_tx_id=" + artifact.BaseTxID.String
+	}
+	if err := sendTelegramText(token, artifact.ApprovalChatID.Int64, text); err != nil {
+		log.Printf("[supervisor] notify failed: %v", err)
+	}
+}
+
+func sendTelegramText(botToken string, chatID int64, text string) error {
+	endpoint := "https://api.telegram.org/bot" + botToken + "/sendMessage"
+	form := url.Values{}
+	form.Set("chat_id", fmt.Sprintf("%d", chatID))
+	form.Set("text", text)
+	resp, err := http.PostForm(endpoint, form)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram send status=%d", resp.StatusCode)
 	}
 	return nil
 }

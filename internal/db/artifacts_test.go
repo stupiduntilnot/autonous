@@ -402,3 +402,31 @@ func TestTransitionArtifactStatusWithEvent(t *testing.T) {
 		t.Fatalf("unexpected event payload: %s", payload)
 	}
 }
+
+func TestApproveArtifactWithEvent(t *testing.T) {
+	database := testDB(t)
+	if err := InsertArtifact(database, "tx-approve-meta", "", "/state/artifacts/tx-approve-meta/worker", ArtifactStatusStaged); err != nil {
+		t.Fatal(err)
+	}
+	parentID, err := LogEvent(database, nil, EventAgentStarted, map[string]any{"task_id": 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := ApproveArtifactWithEvent(database, &parentID, "tx-approve-meta", 12345)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("expected approve success")
+	}
+	a, err := GetArtifactByTxID(database, "tx-approve-meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Status != ArtifactStatusApproved {
+		t.Fatalf("unexpected status: %s", a.Status)
+	}
+	if !a.ApprovalChatID.Valid || a.ApprovalChatID.Int64 != 12345 {
+		t.Fatalf("unexpected approval_chat_id: %+v", a.ApprovalChatID)
+	}
+}

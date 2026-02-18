@@ -370,6 +370,37 @@ func MarkArtifactDeployFailed(database *sql.DB, txID, lastError string) (bool, e
 	return affected > 0, nil
 }
 
+func ApproveArtifactWithEvent(database *sql.DB, parentID *int64, txID string, chatID int64) (bool, error) {
+	tx, err := database.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
+		`UPDATE artifacts
+		    SET status = ?, approval_chat_id = ?, updated_at = unixepoch()
+		  WHERE tx_id = ? AND status = ?`,
+		ArtifactStatusApproved, chatID, txID, ArtifactStatusStaged,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	if _, err := LogEventTx(tx, parentID, "update.approved", map[string]any{"tx_id": txID}); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func LatestPromotedTxID(database *sql.DB) (string, error) {
 	var txID string
 	err := database.QueryRow(

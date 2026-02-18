@@ -833,10 +833,7 @@ func processDirectCommand(database *sql.DB, commander cmdpkg.Commander, cfg *con
 		if artifact.Status != db.ArtifactStatusStaged {
 			return true, fmt.Sprintf("approve 忽略：tx_id=%s 当前状态=%s", txID, artifact.Status), false, nil
 		}
-		ok, terr := db.TransitionArtifactStatusWithEvent(
-			database, &agentEventID, txID, db.ArtifactStatusStaged, db.ArtifactStatusApproved, "",
-			"update.approved", map[string]any{"tx_id": txID},
-		)
+		ok, terr := db.ApproveArtifactWithEvent(database, &agentEventID, txID, task.ChatID)
 		if terr != nil {
 			return true, "", false, terr
 		}
