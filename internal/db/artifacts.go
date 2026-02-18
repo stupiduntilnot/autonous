@@ -277,6 +277,51 @@ func MarkArtifactDeployFailed(database *sql.DB, txID, lastError string) (bool, e
 	return affected > 0, nil
 }
 
+func LatestPromotedTxID(database *sql.DB) (string, error) {
+	var txID string
+	err := database.QueryRow(
+		`SELECT tx_id FROM artifacts WHERE status = ? ORDER BY id DESC LIMIT 1`,
+		ArtifactStatusPromoted,
+	).Scan(&txID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return txID, nil
+}
+
+func SetArtifactBuildMetadata(database *sql.DB, txID, sha256Hex, gitRevision string) error {
+	_, err := database.Exec(
+		`UPDATE artifacts
+		    SET sha256 = ?, git_revision = ?, build_finished_at = unixepoch(), updated_at = unixepoch()
+		  WHERE tx_id = ?`,
+		nullIfEmpty(sha256Hex), nullIfEmpty(gitRevision), txID,
+	)
+	return err
+}
+
+func SetArtifactTestSummary(database *sql.DB, txID, summary string) error {
+	_, err := database.Exec(
+		`UPDATE artifacts
+		    SET test_summary = ?, updated_at = unixepoch()
+		  WHERE tx_id = ?`,
+		nullIfEmpty(summary), txID,
+	)
+	return err
+}
+
+func SetArtifactSelfCheckSummary(database *sql.DB, txID, summary string) error {
+	_, err := database.Exec(
+		`UPDATE artifacts
+		    SET self_check_summary = ?, updated_at = unixepoch()
+		  WHERE tx_id = ?`,
+		nullIfEmpty(summary), txID,
+	)
+	return err
+}
+
 func truncateForDB(s string) string {
 	const max = 2000
 	if len(s) <= max {

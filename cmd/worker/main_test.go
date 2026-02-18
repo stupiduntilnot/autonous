@@ -440,8 +440,9 @@ func TestProcessDirectCommand_ApproveSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	task := &queueTask{ID: 10, ChatID: 1, Text: "approve tx-approve-1"}
+	cfg := &config.WorkerConfig{}
 
-	handled, reply, shouldExit, err := processDirectCommand(database, task, 0)
+	handled, reply, shouldExit, err := processDirectCommand(database, cfg, task, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -469,8 +470,9 @@ func TestProcessDirectCommand_ApproveIgnoredWhenNotStaged(t *testing.T) {
 		t.Fatal(err)
 	}
 	task := &queueTask{ID: 11, ChatID: 1, Text: "approve tx-approve-2"}
+	cfg := &config.WorkerConfig{}
 
-	handled, reply, shouldExit, err := processDirectCommand(database, task, 0)
+	handled, reply, shouldExit, err := processDirectCommand(database, cfg, task, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -482,6 +484,47 @@ func TestProcessDirectCommand_ApproveIgnoredWhenNotStaged(t *testing.T) {
 	}
 	if !strings.Contains(reply, "approve 忽略") {
 		t.Fatalf("unexpected reply: %s", reply)
+	}
+}
+
+func TestProcessDirectCommand_UpdateStage(t *testing.T) {
+	database := testWorkerDB(t)
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifactRoot := filepath.Join(t.TempDir(), "artifacts")
+	cfg := &config.WorkerConfig{
+		WorkspaceDir:             repoRoot,
+		UpdateArtifactRoot:       artifactRoot,
+		UpdateTestCmd:            "true",
+		UpdateSelfCheckCmd:       "",
+		UpdatePipelineTimeoutSec: 120,
+	}
+	task := &queueTask{ID: 12, ChatID: 1, Text: "update stage tx-stage-1"}
+
+	handled, reply, shouldExit, err := processDirectCommand(database, cfg, task, 0)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected handled=true")
+	}
+	if shouldExit {
+		t.Fatal("expected shouldExit=false")
+	}
+	if !strings.Contains(reply, "update stage 成功") {
+		t.Fatalf("unexpected reply: %s", reply)
+	}
+	artifact, err := db.GetArtifactByTxID(database, "tx-stage-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Status != db.ArtifactStatusStaged {
+		t.Fatalf("unexpected status: %s", artifact.Status)
+	}
+	if _, err := os.Stat(filepath.Join(artifactRoot, "tx-stage-1", "worker")); err != nil {
+		t.Fatalf("expected worker binary artifact: %v", err)
 	}
 }
 

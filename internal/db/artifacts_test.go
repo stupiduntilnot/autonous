@@ -216,3 +216,49 @@ func TestMarkArtifactDeployCompletedAndFailed(t *testing.T) {
 		t.Fatal("expected last_error to be set")
 	}
 }
+
+func TestLatestPromotedTxIDAndMetadataSetters(t *testing.T) {
+	database := testDB(t)
+	if err := InsertArtifact(database, "tx-p1", "", "/state/artifacts/tx-p1/worker", ArtifactStatusPromoted); err != nil {
+		t.Fatal(err)
+	}
+	if err := InsertArtifact(database, "tx-p2", "", "/state/artifacts/tx-p2/worker", ArtifactStatusPromoted); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LatestPromotedTxID(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "tx-p2" {
+		t.Fatalf("unexpected latest promoted tx: %s", got)
+	}
+
+	if err := InsertArtifact(database, "tx-meta", "", "/state/artifacts/tx-meta/worker", ArtifactStatusBuilding); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetArtifactBuildMetadata(database, "tx-meta", "abc123", "rev123"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetArtifactTestSummary(database, "tx-meta", `{"ok":true}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetArtifactSelfCheckSummary(database, "tx-meta", `{"self_check":"skipped"}`); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := GetArtifactByTxID(database, "tx-meta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !artifact.SHA256.Valid || artifact.SHA256.String != "abc123" {
+		t.Fatalf("unexpected sha: %+v", artifact.SHA256)
+	}
+	if !artifact.GitRevision.Valid || artifact.GitRevision.String != "rev123" {
+		t.Fatalf("unexpected revision: %+v", artifact.GitRevision)
+	}
+	if !artifact.TestSummary.Valid || artifact.TestSummary.String == "" {
+		t.Fatalf("unexpected test summary: %+v", artifact.TestSummary)
+	}
+	if !artifact.SelfCheckSummary.Valid || artifact.SelfCheckSummary.String == "" {
+		t.Fatalf("unexpected self-check summary: %+v", artifact.SelfCheckSummary)
+	}
+}

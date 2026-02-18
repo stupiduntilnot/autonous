@@ -3,13 +3,17 @@ package main
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -249,7 +253,7 @@ func main() {
 			"text":      truncate(task.Text, 1000),
 		})
 
-		if handled, directReply, shouldExit, directErr := processDirectCommand(database, task, agentEventID); handled {
+		if handled, directReply, shouldExit, directErr := processDirectCommand(database, &cfg, task, agentEventID); handled {
 			if directErr != nil {
 				msg := directErr.Error()
 				markTaskFailed(database, task.ID, msg)
@@ -713,6 +717,7 @@ var secretPatterns = []*regexp.Regexp{
 }
 
 var approveCommandPattern = regexp.MustCompile(`(?i)^\s*approve\s+([a-z0-9-]+)\s*$`)
+var updateStageCommandPattern = regexp.MustCompile(`(?i)^\s*update\s+stage\s+([a-z0-9-]+)\s*$`)
 
 func redactSecrets(text string) (string, bool) {
 	out := text
@@ -781,8 +786,21 @@ func extractJSONObject(content string) (string, bool) {
 	return "", false
 }
 
-func processDirectCommand(database *sql.DB, task *queueTask, agentEventID int64) (handled bool, reply string, shouldExit bool, err error) {
-	m := approveCommandPattern.FindStringSubmatch(strings.TrimSpace(task.Text))
+func processDirectCommand(database *sql.DB, cfg *config.WorkerConfig, task *queueTask, agentEventID int64) (handled bool, reply string, shouldExit bool, err error) {
+	text := strings.TrimSpace(task.Text)
+	if m := updateStageCommandPattern.FindStringSubmatch(text); len(m) == 2 {
+		txID := strings.TrimSpace(strings.ToLower(m[1]))
+		if txID == "" {
+			return true, "update stage 失败：tx_id 不能为空", false, nil
+		}
+		stageReply, stageErr := runUpdateStagePipeline(database, cfg, txID, agentEventID)
+		if stageErr != nil {
+			return true, "", false, stageErr
+		}
+		return true, stageReply, false, nil
+	}
+
+	m := approveCommandPattern.FindStringSubmatch(text)
 	if len(m) != 2 {
 		return false, "", false, nil
 	}
@@ -816,6 +834,137 @@ func processDirectCommand(database *sql.DB, task *queueTask, agentEventID int64)
 		"tx_id": txID,
 	})
 	return true, fmt.Sprintf("approve 成功：tx_id=%s，worker 将退出以触发部署", txID), true, nil
+}
+
+func runUpdateStagePipeline(database *sql.DB, cfg *config.WorkerConfig, txID string, agentEventID int64) (string, error) {
+	baseTxID, err := db.LatestPromotedTxID(database)
+	if err != nil {
+		return "", err
+	}
+	binPath := filepath.Join(cfg.UpdateArtifactRoot, txID, "worker")
+	if err := os.MkdirAll(filepath.Dir(binPath), 0o755); err != nil {
+		return "", err
+	}
+	if err := db.InsertArtifact(database, txID, baseTxID, binPath, db.ArtifactStatusCreated); err != nil {
+		return "", err
+	}
+	db.LogEvent(database, &agentEventID, "update.txn.created", map[string]any{
+		"tx_id":      txID,
+		"base_tx_id": baseTxID,
+		"bin_path":   binPath,
+	})
+
+	if ok, err := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusCreated, db.ArtifactStatusBuilding, ""); err != nil {
+		return "", err
+	} else if !ok {
+		return "", fmt.Errorf("failed to enter building: tx_id=%s", txID)
+	}
+	db.LogEvent(database, &agentEventID, "update.build.started", map[string]any{"tx_id": txID})
+
+	if err := runCommandWithTimeout(cfg.WorkspaceDir, cfg.UpdatePipelineTimeoutSec, "go", "build", "-o", binPath, "./cmd/worker"); err != nil {
+		_, _ = db.TransitionArtifactStatus(database, txID, db.ArtifactStatusBuilding, db.ArtifactStatusBuildFailed, err.Error())
+		db.LogEvent(database, &agentEventID, "update.build.failed", map[string]any{"tx_id": txID, "error": truncate(err.Error(), 1000)})
+		return "", err
+	}
+	sha, err := fileSHA256Hex(binPath)
+	if err != nil {
+		_, _ = db.TransitionArtifactStatus(database, txID, db.ArtifactStatusBuilding, db.ArtifactStatusBuildFailed, err.Error())
+		return "", err
+	}
+	rev := gitHeadRev(cfg.WorkspaceDir)
+	if err := db.SetArtifactBuildMetadata(database, txID, sha, rev); err != nil {
+		return "", err
+	}
+	db.LogEvent(database, &agentEventID, "update.build.completed", map[string]any{"tx_id": txID, "sha256": sha, "git_revision": rev})
+
+	if ok, err := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusBuilding, db.ArtifactStatusTesting, ""); err != nil {
+		return "", err
+	} else if !ok {
+		return "", fmt.Errorf("failed to enter testing: tx_id=%s", txID)
+	}
+	db.LogEvent(database, &agentEventID, "update.test.started", map[string]any{"tx_id": txID, "cmd": cfg.UpdateTestCmd})
+	if err := runShellCommandWithTimeout(cfg.WorkspaceDir, cfg.UpdatePipelineTimeoutSec, cfg.UpdateTestCmd); err != nil {
+		_ = db.SetArtifactTestSummary(database, txID, truncate("failed: "+err.Error(), 2000))
+		_, _ = db.TransitionArtifactStatus(database, txID, db.ArtifactStatusTesting, db.ArtifactStatusTestFailed, err.Error())
+		db.LogEvent(database, &agentEventID, "update.test.failed", map[string]any{"tx_id": txID, "error": truncate(err.Error(), 1000)})
+		return "", err
+	}
+	_ = db.SetArtifactTestSummary(database, txID, "ok")
+	db.LogEvent(database, &agentEventID, "update.test.completed", map[string]any{"tx_id": txID})
+
+	if ok, err := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusTesting, db.ArtifactStatusSelfChecking, ""); err != nil {
+		return "", err
+	} else if !ok {
+		return "", fmt.Errorf("failed to enter self_checking: tx_id=%s", txID)
+	}
+	db.LogEvent(database, &agentEventID, "update.self_check.started", map[string]any{"tx_id": txID, "cmd": cfg.UpdateSelfCheckCmd})
+	if strings.TrimSpace(cfg.UpdateSelfCheckCmd) != "" {
+		if err := runShellCommandWithTimeout(cfg.WorkspaceDir, cfg.UpdatePipelineTimeoutSec, cfg.UpdateSelfCheckCmd); err != nil {
+			_ = db.SetArtifactSelfCheckSummary(database, txID, truncate("failed: "+err.Error(), 2000))
+			_, _ = db.TransitionArtifactStatus(database, txID, db.ArtifactStatusSelfChecking, db.ArtifactStatusSelfCheckFailed, err.Error())
+			db.LogEvent(database, &agentEventID, "update.self_check.failed", map[string]any{"tx_id": txID, "error": truncate(err.Error(), 1000)})
+			return "", err
+		}
+		_ = db.SetArtifactSelfCheckSummary(database, txID, "ok")
+	} else {
+		_ = db.SetArtifactSelfCheckSummary(database, txID, "skipped")
+	}
+	db.LogEvent(database, &agentEventID, "update.self_check.completed", map[string]any{"tx_id": txID})
+
+	if ok, err := db.TransitionArtifactStatus(database, txID, db.ArtifactStatusSelfChecking, db.ArtifactStatusStaged, ""); err != nil {
+		return "", err
+	} else if !ok {
+		return "", fmt.Errorf("failed to enter staged: tx_id=%s", txID)
+	}
+	db.LogEvent(database, &agentEventID, "update.artifact.staged", map[string]any{"tx_id": txID, "sha256": sha})
+	return fmt.Sprintf("update stage 成功：tx_id=%s sha256=%s", txID, sha), nil
+}
+
+func runCommandWithTimeout(workdir string, timeoutSec int, name string, args ...string) error {
+	if timeoutSec <= 0 {
+		timeoutSec = 1800
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = workdir
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("command timed out: %s %s", name, strings.Join(args, " "))
+	}
+	if err != nil {
+		return fmt.Errorf("%s %s failed: %w; output=%s", name, strings.Join(args, " "), err, truncate(string(out), 2000))
+	}
+	return nil
+}
+
+func runShellCommandWithTimeout(workdir string, timeoutSec int, command string) error {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return nil
+	}
+	return runCommandWithTimeout(workdir, timeoutSec, "bash", "-lc", command)
+}
+
+func fileSHA256Hex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func gitHeadRev(workspaceDir string) string {
+	out, err := exec.Command("git", "-C", workspaceDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // --- DB helper functions ---
