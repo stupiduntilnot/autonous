@@ -325,24 +325,24 @@ if err := os.Rename(tmpLink, activeBin); err != nil { return err }
 
 ### 1. Schema 与仓储
 
-- [ ] 新增 `artifacts` schema 与索引
-- [ ] 实现 `artifacts` 状态转移仓储（含条件更新）
+- [DONE] 新增 `artifacts` schema 与索引
+- [DONE] 实现 `artifacts` 状态转移仓储（含条件更新）
 - [ ] 将状态更新与 `events` 写入封装到同一事务
 
 ### 2. Worker 流水线
 
-- [ ] 实现 build/test/self-check/stage
-- [ ] 实现 `approve <tx_id>` 直接命令路径（绕过 LLM）
-- [ ] 审批成功后主动退出 worker，触发 supervisor deploy 循环
+- [DONE] 实现 build/test/self-check/stage
+- [DONE] 实现 `approve <tx_id>` 直接命令路径（绕过 LLM）
+- [DONE] 审批成功后主动退出 worker，触发 supervisor deploy 循环
 
 ### 3. Supervisor 部署与回滚
 
-- [ ] 启动阶段进行态清理
-- [ ] 实现 `approved` 事务消费与原子 deploy（含 SHA256 复验）
-- [ ] 实现 `deployed_unstable -> promoted` 延迟判定与自动回滚
+- [DONE] 启动阶段进行态清理
+- [DONE] 实现 `approved` 事务消费与原子 deploy（含 SHA256 复验）
+- [DONE] 实现 `deployed_unstable -> promoted` 延迟判定与自动回滚
 
 ### 4. 验收
 
-- [ ] `go build ./... && go test ./...` 全通过
-- [ ] 成功/失败/回滚三类 E2E 全通过
+- [DONE] `go build ./... && go test ./...` 全通过
+- [DONE] 成功/失败/回滚三类 E2E 全通过
 - [ ] 文档与实现一致（`milestones.md`、`project.md` 索引可追踪）
