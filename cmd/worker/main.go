@@ -959,7 +959,7 @@ func runShellCommandWithTimeout(workdir string, timeoutSec int, command string) 
 	if command == "" {
 		return nil
 	}
-	return runCommandWithTimeout(workdir, timeoutSec, "bash", "-lc", command)
+	return runCommandWithTimeout(workdir, timeoutSec, "bash", "-c", command)
 }
 
 func fileSHA256Hex(path string) (string, error) {
