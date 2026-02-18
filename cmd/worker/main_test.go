@@ -236,6 +236,16 @@ func (c *captureCommander) SendMessage(chatID int64, text string) error {
 	return nil
 }
 
+type approvalCaptureCommander struct {
+	captureCommander
+	approveTxID string
+}
+
+func (c *approvalCaptureCommander) SendApprovalRequest(chatID int64, txID string) error {
+	c.approveTxID = txID
+	return nil
+}
+
 func TestProcessTask_ToolLoopLS(t *testing.T) {
 	database := testWorkerDB(t)
 	base := t.TempDir()
@@ -442,7 +452,7 @@ func TestProcessDirectCommand_ApproveSuccess(t *testing.T) {
 	task := &queueTask{ID: 10, ChatID: 1, Text: "approve tx-approve-1"}
 	cfg := &config.WorkerConfig{}
 
-	handled, reply, shouldExit, err := processDirectCommand(database, cfg, task, 0)
+	handled, reply, shouldExit, err := processDirectCommand(database, &captureCommander{}, cfg, task, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -472,7 +482,7 @@ func TestProcessDirectCommand_ApproveIgnoredWhenNotStaged(t *testing.T) {
 	task := &queueTask{ID: 11, ChatID: 1, Text: "approve tx-approve-2"}
 	cfg := &config.WorkerConfig{}
 
-	handled, reply, shouldExit, err := processDirectCommand(database, cfg, task, 0)
+	handled, reply, shouldExit, err := processDirectCommand(database, &captureCommander{}, cfg, task, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -503,7 +513,8 @@ func TestProcessDirectCommand_UpdateStage(t *testing.T) {
 	}
 	task := &queueTask{ID: 12, ChatID: 1, Text: "update stage tx-stage-1"}
 
-	handled, reply, shouldExit, err := processDirectCommand(database, cfg, task, 0)
+	cmdr := &approvalCaptureCommander{}
+	handled, reply, shouldExit, err := processDirectCommand(database, cmdr, cfg, task, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -515,6 +526,9 @@ func TestProcessDirectCommand_UpdateStage(t *testing.T) {
 	}
 	if !strings.Contains(reply, "update stage 成功") {
 		t.Fatalf("unexpected reply: %s", reply)
+	}
+	if cmdr.approveTxID != "tx-stage-1" {
+		t.Fatalf("expected approval request for tx-stage-1, got %q", cmdr.approveTxID)
 	}
 	artifact, err := db.GetArtifactByTxID(database, "tx-stage-1")
 	if err != nil {
@@ -542,7 +556,7 @@ func TestProcessDirectCommand_UpdateStageDuplicateTxID(t *testing.T) {
 	}
 	task := &queueTask{ID: 13, ChatID: 1, Text: "update stage tx-dup-1"}
 
-	handled, reply, shouldExit, err := processDirectCommand(database, cfg, task, 0)
+	handled, reply, shouldExit, err := processDirectCommand(database, &captureCommander{}, cfg, task, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -554,6 +568,33 @@ func TestProcessDirectCommand_UpdateStageDuplicateTxID(t *testing.T) {
 	}
 	if !strings.Contains(reply, "update stage 忽略") {
 		t.Fatalf("unexpected reply: %s", reply)
+	}
+}
+
+func TestProcessDirectCommand_CancelSuccess(t *testing.T) {
+	database := testWorkerDB(t)
+	if err := db.InsertArtifact(database, "tx-cancel-1", "", "/state/artifacts/tx-cancel-1/worker", db.ArtifactStatusStaged); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.WorkerConfig{}
+	task := &queueTask{ID: 14, ChatID: 1, Text: "cancel tx-cancel-1"}
+
+	handled, reply, shouldExit, err := processDirectCommand(database, &captureCommander{}, cfg, task, 0)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if !handled || shouldExit {
+		t.Fatalf("unexpected handled/shouldExit: %v/%v", handled, shouldExit)
+	}
+	if !strings.Contains(reply, "cancel 成功") {
+		t.Fatalf("unexpected reply: %s", reply)
+	}
+	a, err := db.GetArtifactByTxID(database, "tx-cancel-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Status != db.ArtifactStatusCancelled {
+		t.Fatalf("unexpected status: %s", a.Status)
 	}
 }
 

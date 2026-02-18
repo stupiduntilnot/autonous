@@ -253,7 +253,7 @@ func main() {
 			"text":      truncate(task.Text, 1000),
 		})
 
-		if handled, directReply, shouldExit, directErr := processDirectCommand(database, &cfg, task, agentEventID); handled {
+		if handled, directReply, shouldExit, directErr := processDirectCommand(database, commander, &cfg, task, agentEventID); handled {
 			if directErr != nil {
 				msg := directErr.Error()
 				markTaskFailed(database, task.ID, msg)
@@ -718,6 +718,7 @@ var secretPatterns = []*regexp.Regexp{
 
 var approveCommandPattern = regexp.MustCompile(`(?i)^\s*approve\s+([a-z0-9-]+)\s*$`)
 var updateStageCommandPattern = regexp.MustCompile(`(?i)^\s*update\s+stage\s+([a-z0-9-]+)\s*$`)
+var cancelCommandPattern = regexp.MustCompile(`(?i)^\s*cancel\s+([a-z0-9-]+)\s*$`)
 
 func redactSecrets(text string) (string, bool) {
 	out := text
@@ -786,7 +787,7 @@ func extractJSONObject(content string) (string, bool) {
 	return "", false
 }
 
-func processDirectCommand(database *sql.DB, cfg *config.WorkerConfig, task *queueTask, agentEventID int64) (handled bool, reply string, shouldExit bool, err error) {
+func processDirectCommand(database *sql.DB, commander cmdpkg.Commander, cfg *config.WorkerConfig, task *queueTask, agentEventID int64) (handled bool, reply string, shouldExit bool, err error) {
 	text := strings.TrimSpace(task.Text)
 	if m := updateStageCommandPattern.FindStringSubmatch(text); len(m) == 2 {
 		txID := strings.TrimSpace(strings.ToLower(m[1]))
@@ -797,43 +798,83 @@ func processDirectCommand(database *sql.DB, cfg *config.WorkerConfig, task *queu
 		if stageErr != nil {
 			return true, "", false, stageErr
 		}
+		if strings.HasPrefix(stageReply, "update stage 成功") {
+			if requester, ok := commander.(interface {
+				SendApprovalRequest(chatID int64, txID string) error
+			}); ok {
+				if err := requester.SendApprovalRequest(task.ChatID, txID); err != nil {
+					return true, "", false, err
+				}
+				stageReply += "\n已发送审批按钮，请点击 Approve 或 Cancel。"
+			} else {
+				stageReply += "\n请发送: approve " + txID + " 或 cancel " + txID
+			}
+		}
 		return true, stageReply, false, nil
 	}
 
-	m := approveCommandPattern.FindStringSubmatch(text)
-	if len(m) != 2 {
-		return false, "", false, nil
-	}
-	txID := strings.TrimSpace(strings.ToLower(m[1]))
-	if txID == "" {
-		return true, "approve 失败：tx_id 不能为空", false, nil
+	if m := approveCommandPattern.FindStringSubmatch(text); len(m) == 2 {
+		txID := strings.TrimSpace(strings.ToLower(m[1]))
+		if txID == "" {
+			return true, "approve 失败：tx_id 不能为空", false, nil
+		}
+
+		artifact, qerr := db.GetArtifactByTxID(database, txID)
+		if qerr != nil {
+			if errors.Is(qerr, db.ErrArtifactNotFound) {
+				return true, fmt.Sprintf("approve 失败：tx_id=%s 不存在", txID), false, nil
+			}
+			return true, "", false, qerr
+		}
+		if artifact.Status != db.ArtifactStatusStaged {
+			return true, fmt.Sprintf("approve 忽略：tx_id=%s 当前状态=%s", txID, artifact.Status), false, nil
+		}
+		ok, terr := db.TransitionArtifactStatusWithEvent(
+			database, &agentEventID, txID, db.ArtifactStatusStaged, db.ArtifactStatusApproved, "",
+			"update.approved", map[string]any{"tx_id": txID},
+		)
+		if terr != nil {
+			return true, "", false, terr
+		}
+		if !ok {
+			latest, lerr := db.GetArtifactByTxID(database, txID)
+			if lerr != nil {
+				return true, "", false, lerr
+			}
+			return true, fmt.Sprintf("approve 忽略：tx_id=%s 当前状态=%s", txID, latest.Status), false, nil
+		}
+		return true, fmt.Sprintf("approve 成功：tx_id=%s，worker 将退出以触发部署", txID), true, nil
 	}
 
-	artifact, qerr := db.GetArtifactByTxID(database, txID)
-	if qerr != nil {
-		if errors.Is(qerr, db.ErrArtifactNotFound) {
-			return true, fmt.Sprintf("approve 失败：tx_id=%s 不存在", txID), false, nil
+	if m := cancelCommandPattern.FindStringSubmatch(text); len(m) == 2 {
+		txID := strings.TrimSpace(strings.ToLower(m[1]))
+		if txID == "" {
+			return true, "cancel 失败：tx_id 不能为空", false, nil
 		}
-		return true, "", false, qerr
-	}
-	if artifact.Status != db.ArtifactStatusStaged {
-		return true, fmt.Sprintf("approve 忽略：tx_id=%s 当前状态=%s", txID, artifact.Status), false, nil
-	}
-	ok, terr := db.TransitionArtifactStatusWithEvent(
-		database, &agentEventID, txID, db.ArtifactStatusStaged, db.ArtifactStatusApproved, "",
-		"update.approved", map[string]any{"tx_id": txID},
-	)
-	if terr != nil {
-		return true, "", false, terr
-	}
-	if !ok {
-		latest, lerr := db.GetArtifactByTxID(database, txID)
-		if lerr != nil {
-			return true, "", false, lerr
+		artifact, qerr := db.GetArtifactByTxID(database, txID)
+		if qerr != nil {
+			if errors.Is(qerr, db.ErrArtifactNotFound) {
+				return true, fmt.Sprintf("cancel 失败：tx_id=%s 不存在", txID), false, nil
+			}
+			return true, "", false, qerr
 		}
-		return true, fmt.Sprintf("approve 忽略：tx_id=%s 当前状态=%s", txID, latest.Status), false, nil
+		if artifact.Status != db.ArtifactStatusStaged {
+			return true, fmt.Sprintf("cancel 忽略：tx_id=%s 当前状态=%s", txID, artifact.Status), false, nil
+		}
+		ok, terr := db.TransitionArtifactStatusWithEvent(
+			database, &agentEventID, txID, db.ArtifactStatusStaged, db.ArtifactStatusCancelled, "",
+			"update.cancelled", map[string]any{"tx_id": txID},
+		)
+		if terr != nil {
+			return true, "", false, terr
+		}
+		if !ok {
+			return true, fmt.Sprintf("cancel 忽略：tx_id=%s 状态已变化", txID), false, nil
+		}
+		return true, fmt.Sprintf("cancel 成功：tx_id=%s 已取消", txID), false, nil
 	}
-	return true, fmt.Sprintf("approve 成功：tx_id=%s，worker 将退出以触发部署", txID), true, nil
+
+	return false, "", false, nil
 }
 
 func runUpdateStagePipeline(database *sql.DB, cfg *config.WorkerConfig, txID string, agentEventID int64) (string, error) {
