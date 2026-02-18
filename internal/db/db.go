@@ -63,7 +63,7 @@ func OpenDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-// InitSchema creates all tables: events, inbox, history.
+// InitSchema creates all tables: events, inbox, history, artifacts.
 func InitSchema(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS events (
@@ -97,6 +97,29 @@ func InitSchema(db *sql.DB) error {
 			text TEXT NOT NULL,
 			created_at INTEGER NOT NULL DEFAULT (unixepoch())
 		);
+
+		CREATE TABLE IF NOT EXISTS artifacts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tx_id TEXT NOT NULL UNIQUE,
+			base_tx_id TEXT,
+			bin_path TEXT NOT NULL,
+			sha256 TEXT,
+			git_revision TEXT,
+			build_started_at INTEGER,
+			build_finished_at INTEGER,
+			test_summary TEXT,
+			self_check_summary TEXT,
+			approval_chat_id INTEGER,
+			approval_message_id INTEGER,
+			deploy_started_at INTEGER,
+			deploy_finished_at INTEGER,
+			status TEXT NOT NULL,
+			last_error TEXT,
+			created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+			updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+		);
+		CREATE INDEX IF NOT EXISTS idx_artifacts_status_updated_at ON artifacts(status, updated_at);
+		CREATE INDEX IF NOT EXISTS idx_artifacts_base_tx_id ON artifacts(base_tx_id);
 	`)
 	return err
 }

@@ -22,9 +22,9 @@ func testDB(t *testing.T) *sql.DB {
 func TestInitSchema(t *testing.T) {
 	db := testDB(t)
 
-	// Verify all three tables exist by querying sqlite_master.
+	// Verify all tables exist by querying sqlite_master.
 	tables := map[string]bool{}
-	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('events','inbox','history')`)
+	rows, err := db.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('events','inbox','history','artifacts')`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestInitSchema(t *testing.T) {
 		tables[name] = true
 	}
 
-	for _, want := range []string{"events", "inbox", "history"} {
+	for _, want := range []string{"events", "inbox", "history", "artifacts"} {
 		if !tables[want] {
 			t.Errorf("table %q not created", want)
 		}
