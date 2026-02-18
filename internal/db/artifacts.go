@@ -83,6 +83,9 @@ var artifactStatusTransitions = map[string]map[string]struct{}{
 		ArtifactStatusPromoted:        struct{}{},
 		ArtifactStatusRollbackPending: struct{}{},
 	},
+	ArtifactStatusPromoted: {
+		ArtifactStatusRollbackPending: struct{}{},
+	},
 	ArtifactStatusRollbackPending: {
 		ArtifactStatusRolledBack: struct{}{},
 	},
@@ -452,6 +455,34 @@ func MarkArtifactPromoted(database *sql.DB, txID string) (bool, error) {
 
 func MarkArtifactRollbackPending(database *sql.DB, txID string) (bool, error) {
 	return TransitionArtifactStatus(database, txID, ArtifactStatusDeployedUnstable, ArtifactStatusRollbackPending, "")
+}
+
+func RequestArtifactRollbackWithEvent(database *sql.DB, parentID *int64, txID string) (bool, string, error) {
+	artifact, err := GetArtifactByTxID(database, txID)
+	if err != nil {
+		if errors.Is(err, ErrArtifactNotFound) {
+			return false, "", ErrArtifactNotFound
+		}
+		return false, "", err
+	}
+	switch artifact.Status {
+	case ArtifactStatusRollbackPending:
+		return false, ArtifactStatusRollbackPending, nil
+	case ArtifactStatusDeployedUnstable, ArtifactStatusPromoted:
+		if !artifact.BaseTxID.Valid || strings.TrimSpace(artifact.BaseTxID.String) == "" {
+			return false, artifact.Status, nil
+		}
+		ok, err := TransitionArtifactStatusWithEvent(
+			database, parentID, txID, artifact.Status, ArtifactStatusRollbackPending, "",
+			"update.rollback.requested", map[string]any{"tx_id": txID},
+		)
+		if err != nil {
+			return false, artifact.Status, err
+		}
+		return ok, artifact.Status, nil
+	default:
+		return false, artifact.Status, nil
+	}
 }
 
 func MarkArtifactRolledBack(database *sql.DB, txID string) (bool, error) {

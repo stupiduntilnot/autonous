@@ -203,6 +203,17 @@ Milestone 5 必须覆盖：
 - `Commander` 暴露统一审批动作事件，不泄漏 Telegram payload
 - `worker` 是唯一状态机执行者
 
+### 4.2) 手动回滚（worker，直接命令路径）
+
+- 消息预处理匹配：`^rollback\\s+([a-z0-9-]+)$`
+- 命中后直接走 DB 状态机，不经过 LLM/tool loop：
+  - `deployed_unstable|promoted -> rollback_pending`
+- worker 回执成功后主动退出，触发 supervisor 下一轮执行实际回滚
+- supervisor 每轮启动 worker 前优先处理 `rollback_pending`：
+  - 原子切换 `worker.current` 到 `base_tx_id` 对应产物
+  - `rollback_pending -> rolled_back`
+  - 写事件：`update.rollback.completed`
+
 ### 5) Deploy（supervisor）
 
 - 在 worker 退出后的 supervisor 循环中查询 `status='approved'`
@@ -340,6 +351,7 @@ if err := os.Rename(tmpLink, activeBin); err != nil { return err }
 - [DONE] 启动阶段进行态清理
 - [DONE] 实现 `approved` 事务消费与原子 deploy（含 SHA256 复验）
 - [DONE] 实现 `deployed_unstable -> promoted` 延迟判定与自动回滚
+- [DONE] 实现 `rollback <tx_id>` 手动回滚请求与 `rollback_pending` 优先消费
 
 ### 4. 验收
 

@@ -723,6 +723,7 @@ var secretPatterns = []*regexp.Regexp{
 var approveCommandPattern = regexp.MustCompile(`(?i)^\s*approve\s+([a-z0-9-]+)\s*$`)
 var updateStageCommandPattern = regexp.MustCompile(`(?i)^\s*update\s+stage\s+([a-z0-9-]+)\s*$`)
 var cancelCommandPattern = regexp.MustCompile(`(?i)^\s*cancel\s+([a-z0-9-]+)\s*$`)
+var rollbackCommandPattern = regexp.MustCompile(`(?i)^\s*rollback\s+([a-z0-9-]+)\s*$`)
 
 func redactSecrets(text string) (string, bool) {
 	out := text
@@ -873,6 +874,27 @@ func processDirectCommand(database *sql.DB, commander cmdpkg.Commander, cfg *con
 			return true, fmt.Sprintf("cancel 忽略：tx_id=%s 状态已变化", txID), false, nil
 		}
 		return true, fmt.Sprintf("cancel 成功：tx_id=%s 已取消", txID), false, nil
+	}
+
+	if m := rollbackCommandPattern.FindStringSubmatch(text); len(m) == 2 {
+		txID := strings.TrimSpace(strings.ToLower(m[1]))
+		if txID == "" {
+			return true, "rollback 失败：tx_id 不能为空", false, nil
+		}
+		requested, current, rerr := db.RequestArtifactRollbackWithEvent(database, &agentEventID, txID)
+		if rerr != nil {
+			if errors.Is(rerr, db.ErrArtifactNotFound) {
+				return true, fmt.Sprintf("rollback 失败：tx_id=%s 不存在", txID), false, nil
+			}
+			return true, "", false, rerr
+		}
+		if requested {
+			return true, fmt.Sprintf("rollback 已受理：tx_id=%s，worker 将退出以触发回滚", txID), true, nil
+		}
+		if current == db.ArtifactStatusRollbackPending {
+			return true, fmt.Sprintf("rollback 已在进行：tx_id=%s，worker 将退出以触发回滚", txID), true, nil
+		}
+		return true, fmt.Sprintf("rollback 忽略：tx_id=%s 当前状态=%s", txID, current), false, nil
 	}
 
 	return false, "", false, nil

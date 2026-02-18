@@ -430,3 +430,56 @@ func TestApproveArtifactWithEvent(t *testing.T) {
 		t.Fatalf("unexpected approval_chat_id: %+v", a.ApprovalChatID)
 	}
 }
+
+func TestRequestArtifactRollbackWithEvent(t *testing.T) {
+	database := testDB(t)
+	if err := InsertArtifact(database, "tx-rb-1", "tx-base", "/state/artifacts/tx-rb-1/worker", ArtifactStatusPromoted); err != nil {
+		t.Fatal(err)
+	}
+	parentID, err := LogEvent(database, nil, EventAgentStarted, map[string]any{"task_id": 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, prev, err := RequestArtifactRollbackWithEvent(database, &parentID, "tx-rb-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || prev != ArtifactStatusPromoted {
+		t.Fatalf("unexpected result ok=%v prev=%s", ok, prev)
+	}
+	a, err := GetArtifactByTxID(database, "tx-rb-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Status != ArtifactStatusRollbackPending {
+		t.Fatalf("unexpected status: %s", a.Status)
+	}
+}
+
+func TestRequestArtifactRollbackWithEventWithoutBaseTxID(t *testing.T) {
+	database := testDB(t)
+	if err := InsertArtifact(database, "tx-rb-2", "", "/state/artifacts/tx-rb-2/worker", ArtifactStatusPromoted); err != nil {
+		t.Fatal(err)
+	}
+	parentID, err := LogEvent(database, nil, EventAgentStarted, map[string]any{"task_id": 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, prev, err := RequestArtifactRollbackWithEvent(database, &parentID, "tx-rb-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("expected rollback request to be ignored without base_tx_id")
+	}
+	if prev != ArtifactStatusPromoted {
+		t.Fatalf("unexpected prev status: %s", prev)
+	}
+	a, err := GetArtifactByTxID(database, "tx-rb-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Status != ArtifactStatusPromoted {
+		t.Fatalf("unexpected status: %s", a.Status)
+	}
+}

@@ -98,6 +98,7 @@ Achieve safe self-updates.
 - Upgrade pipeline: generate patch -> build -> test/self-check -> stage artifact -> approve -> deploy
 - Artifact management: store build artifacts + metadata (SHA, build time, tests passed)
 - Rollback: supervisor keeps last-known-good worker (N-1) and auto-reverts on failure
+- Manual rollback command: `rollback <tx_id>` (direct command path, no LLM)
 
 详细设计见 [milestone-5.md](./milestone-5.md)。
 

@@ -182,6 +182,61 @@ func TestAttemptArtifactRollback(t *testing.T) {
 	}
 }
 
+func TestProcessPendingRollback(t *testing.T) {
+	database := testSupervisorDB(t)
+	baseDir := t.TempDir()
+	active := filepath.Join(baseDir, "worker.current")
+	baseBin := filepath.Join(baseDir, "base-worker")
+	newBin := filepath.Join(baseDir, "new-worker")
+	if err := os.WriteFile(baseBin, []byte("base"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newBin, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(newBin, active); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.InsertArtifact(database, "tx-base", "", baseBin, db.ArtifactStatusPromoted); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.InsertArtifact(database, "tx-pending", "tx-base", newBin, db.ArtifactStatusRollbackPending); err != nil {
+		t.Fatal(err)
+	}
+	supEventID, err := db.LogEvent(database, nil, db.EventProcessStarted, map[string]any{"role": "supervisor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.SupervisorConfig{WorkerBin: active}
+
+	ok, err := processPendingRollback(cfg, database, supEventID)
+	if err != nil {
+		t.Fatalf("processPendingRollback failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected rollback success")
+	}
+	resolved, err := filepath.EvalSymlinks(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(baseBin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != want {
+		t.Fatalf("expected active to point to base binary, got %s", resolved)
+	}
+	artifact, err := db.GetArtifactByTxID(database, "tx-pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Status != db.ArtifactStatusRolledBack {
+		t.Fatalf("unexpected status: %s", artifact.Status)
+	}
+}
+
 func TestEnsureBootstrapArtifactRecord(t *testing.T) {
 	database := testSupervisorDB(t)
 	base := t.TempDir()

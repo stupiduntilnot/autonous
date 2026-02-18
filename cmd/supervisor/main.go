@@ -70,6 +70,13 @@ func main() {
 	log.Printf("[supervisor] running worker=%s", cfg.WorkerBin)
 
 	for {
+		if rolledBack, err := processPendingRollback(&cfg, database, supEventID); err != nil {
+			log.Printf("[supervisor] process pending rollback failed: %v", err)
+		} else if rolledBack {
+			time.Sleep(time.Duration(cfg.RestartDelaySeconds) * time.Second)
+			continue
+		}
+
 		if err := deployApprovedArtifact(&cfg, database, supEventID); err != nil {
 			log.Printf("[supervisor] deploy approved artifact failed: %v", err)
 		}
@@ -239,6 +246,24 @@ func attemptArtifactRollback(cfg *config.SupervisorConfig, database *sql.DB, sup
 	if !ok {
 		return false, nil
 	}
+	return executeArtifactRollback(cfg, database, supEventID, artifact)
+}
+
+func processPendingRollback(cfg *config.SupervisorConfig, database *sql.DB, supEventID int64) (bool, error) {
+	artifact, err := db.LatestArtifactByStatus(database, db.ArtifactStatusRollbackPending)
+	if err != nil {
+		return false, err
+	}
+	if artifact == nil {
+		return false, nil
+	}
+	return executeArtifactRollback(cfg, database, supEventID, artifact)
+}
+
+func executeArtifactRollback(cfg *config.SupervisorConfig, database *sql.DB, supEventID int64, artifact *db.Artifact) (bool, error) {
+	if artifact == nil {
+		return false, nil
+	}
 	baseArtifact, err := db.GetArtifactByTxID(database, artifact.BaseTxID.String)
 	if err != nil {
 		return false, err
@@ -251,7 +276,7 @@ func attemptArtifactRollback(cfg *config.SupervisorConfig, database *sql.DB, sup
 		})
 		return false, err
 	}
-	ok, err = db.MarkArtifactRolledBack(database, artifact.TxID)
+	ok, err := db.MarkArtifactRolledBack(database, artifact.TxID)
 	if err != nil {
 		return false, err
 	}
