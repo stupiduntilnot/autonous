@@ -89,7 +89,7 @@ Establish a minimal, orthogonal toolset that supports bootstrapping.
   - phase 1: `ls` only (用于先打通机制与 E2E)
   - phase 2: `find`, `grep`, `read`, `write`, `edit`, `bash`（逐个工具、逐个任务推进）
 
-## Milestone 5 — Self-Update Transaction
+## [DONE] Milestone 5 — Self-Update Transaction
 
 ### Goal
 Achieve safe self-updates.
