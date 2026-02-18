@@ -267,14 +267,16 @@ func main() {
 				}
 				log.Printf("task %d failed: %s", task.ID, msg)
 			} else {
-				if err := commander.SendMessage(task.ChatID, directReply); err != nil {
-					markTaskFailed(database, task.ID, err.Error())
-					db.LogEvent(database, &workerEventID, db.EventAgentFailed, map[string]any{
-						"task_id": task.ID,
-						"error":   truncate(err.Error(), 1000),
-					})
-					log.Printf("task %d failed to send direct reply: %v", task.ID, err)
-					continue
+				if strings.TrimSpace(directReply) != "" {
+					if err := commander.SendMessage(task.ChatID, directReply); err != nil {
+						markTaskFailed(database, task.ID, err.Error())
+						db.LogEvent(database, &workerEventID, db.EventAgentFailed, map[string]any{
+							"task_id": task.ID,
+							"error":   truncate(err.Error(), 1000),
+						})
+						log.Printf("task %d failed to send direct reply: %v", task.ID, err)
+						continue
+					}
 				}
 				db.LogEvent(database, &agentEventID, db.EventReplySent, map[string]any{
 					"chat_id": task.ChatID,
@@ -284,7 +286,9 @@ func main() {
 					"task_id": task.ID,
 				})
 				appendHistory(database, task.ChatID, "user", task.Text)
-				appendHistory(database, task.ChatID, "assistant", directReply)
+				if strings.TrimSpace(directReply) != "" {
+					appendHistory(database, task.ChatID, "assistant", directReply)
+				}
 				if shouldExit {
 					os.Exit(0)
 				}
@@ -800,12 +804,12 @@ func processDirectCommand(database *sql.DB, commander cmdpkg.Commander, cfg *con
 		}
 		if strings.HasPrefix(stageReply, "update stage 成功") {
 			if requester, ok := commander.(interface {
-				SendApprovalRequest(chatID int64, txID string) error
+				SendApprovalRequest(chatID int64, text string, txID string) error
 			}); ok {
-				if err := requester.SendApprovalRequest(task.ChatID, txID); err != nil {
+				if err := requester.SendApprovalRequest(task.ChatID, stageReply, txID); err != nil {
 					return true, "", false, err
 				}
-				stageReply += "\n已发送审批按钮，请点击 Approve 或 Cancel。"
+				return true, "", false, nil
 			} else {
 				stageReply += "\n请发送: approve " + txID + " 或 cancel " + txID
 			}

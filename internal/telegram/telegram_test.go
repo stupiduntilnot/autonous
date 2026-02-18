@@ -54,7 +54,7 @@ func TestSendApprovalRequest_SendsInlineKeyboard(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, 2*time.Second)
-	if err := c.SendApprovalRequest(123, "tx-abc"); err != nil {
+	if err := c.SendApprovalRequest(123, "update stage 成功：tx_id=tx-abc sha256=deadbeef", "tx-abc"); err != nil {
 		t.Fatalf("SendApprovalRequest failed: %v", err)
 	}
 	if !strings.Contains(gotBody, `"inline_keyboard"`) {
@@ -65,5 +65,8 @@ func TestSendApprovalRequest_SendsInlineKeyboard(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, `"cancel tx-abc"`) {
 		t.Fatalf("expected cancel callback_data, got: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, "update stage 成功") {
+		t.Fatalf("expected merged stage success text, got: %s", gotBody)
 	}
 }

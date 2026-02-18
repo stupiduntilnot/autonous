@@ -121,8 +121,8 @@ func (c *Client) SendMessage(chatID int64, text string) error {
 }
 
 // SendApprovalRequest sends a message with inline approve/cancel buttons.
-func (c *Client) SendApprovalRequest(chatID int64, txID string) error {
-	limited := truncate(fmt.Sprintf("候选版本已 staged：%s\n请选择操作。", txID), 3900)
+func (c *Client) SendApprovalRequest(chatID int64, text string, txID string) error {
+	limited := truncate(text, 3900)
 	approve := jsonString("approve " + txID)
 	cancel := jsonString("cancel " + txID)
 	payload := fmt.Sprintf(

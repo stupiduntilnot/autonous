@@ -239,9 +239,11 @@ func (c *captureCommander) SendMessage(chatID int64, text string) error {
 type approvalCaptureCommander struct {
 	captureCommander
 	approveTxID string
+	approveText string
 }
 
-func (c *approvalCaptureCommander) SendApprovalRequest(chatID int64, txID string) error {
+func (c *approvalCaptureCommander) SendApprovalRequest(chatID int64, text string, txID string) error {
+	c.approveText = text
 	c.approveTxID = txID
 	return nil
 }
@@ -524,11 +526,14 @@ func TestProcessDirectCommand_UpdateStage(t *testing.T) {
 	if shouldExit {
 		t.Fatal("expected shouldExit=false")
 	}
-	if !strings.Contains(reply, "update stage 成功") {
-		t.Fatalf("unexpected reply: %s", reply)
+	if strings.TrimSpace(reply) != "" {
+		t.Fatalf("expected empty reply because approval message is merged, got: %q", reply)
 	}
 	if cmdr.approveTxID != "tx-stage-1" {
 		t.Fatalf("expected approval request for tx-stage-1, got %q", cmdr.approveTxID)
+	}
+	if !strings.Contains(cmdr.approveText, "update stage 成功") {
+		t.Fatalf("expected merged approval message text, got: %q", cmdr.approveText)
 	}
 	artifact, err := db.GetArtifactByTxID(database, "tx-stage-1")
 	if err != nil {
