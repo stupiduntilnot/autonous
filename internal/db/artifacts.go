@@ -188,6 +188,103 @@ func CleanupInProgressArtifacts(database *sql.DB) (int64, error) {
 	return res.RowsAffected()
 }
 
+func ClaimApprovedArtifactForDeploy(database *sql.DB) (*Artifact, error) {
+	tx, err := database.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRow(
+		`SELECT id, tx_id, base_tx_id, bin_path, sha256, git_revision,
+		        build_started_at, build_finished_at, test_summary, self_check_summary,
+		        approval_chat_id, approval_message_id, deploy_started_at, deploy_finished_at,
+		        status, last_error, created_at, updated_at
+		   FROM artifacts
+		  WHERE status = ?
+		  ORDER BY created_at ASC, id ASC
+		  LIMIT 1`,
+		ArtifactStatusApproved,
+	)
+
+	var a Artifact
+	if err := row.Scan(
+		&a.ID, &a.TxID, &a.BaseTxID, &a.BinPath, &a.SHA256, &a.GitRevision,
+		&a.BuildStartedAt, &a.BuildFinishedAt, &a.TestSummary, &a.SelfCheckSummary,
+		&a.ApprovalChatID, &a.ApprovalMessageID, &a.DeployStartedAt, &a.DeployFinishedAt,
+		&a.Status, &a.LastError, &a.CreatedAt, &a.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	res, err := tx.Exec(
+		`UPDATE artifacts
+		    SET status = ?, deploy_started_at = unixepoch(), updated_at = unixepoch()
+		  WHERE tx_id = ? AND status = ?`,
+		ArtifactStatusDeploying, a.TxID, ArtifactStatusApproved,
+	)
+	if err != nil {
+		return nil, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if affected == 0 {
+		return nil, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	a.Status = ArtifactStatusDeploying
+	return &a, nil
+}
+
+func MarkArtifactDeployCompleted(database *sql.DB, txID string) (bool, error) {
+	res, err := database.Exec(
+		`UPDATE artifacts
+		    SET status = ?, deploy_finished_at = unixepoch(), updated_at = unixepoch()
+		  WHERE tx_id = ? AND status = ?`,
+		ArtifactStatusDeployedUnstable, txID, ArtifactStatusDeploying,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+func MarkArtifactDeployFailed(database *sql.DB, txID, lastError string) (bool, error) {
+	res, err := database.Exec(
+		`UPDATE artifacts
+		    SET status = ?, deploy_finished_at = unixepoch(), updated_at = unixepoch(), last_error = ?
+		  WHERE tx_id = ? AND status = ?`,
+		ArtifactStatusDeployFailed, truncateForDB(lastError), txID, ArtifactStatusDeploying,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+func truncateForDB(s string) string {
+	const max = 2000
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
 func nullIfEmpty(v string) any {
 	if strings.TrimSpace(v) == "" {
 		return nil

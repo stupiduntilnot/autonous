@@ -129,3 +129,90 @@ func TestCleanupInProgressArtifacts(t *testing.T) {
 	assertStatus("tx-d", ArtifactStatusDeployFailed)
 	assertStatus("tx-e", ArtifactStatusStaged)
 }
+
+func TestClaimApprovedArtifactForDeploy(t *testing.T) {
+	database := testDB(t)
+	if err := InsertArtifact(database, "tx-approved-1", "", "/state/artifacts/tx-approved-1/worker", ArtifactStatusApproved); err != nil {
+		t.Fatal(err)
+	}
+	if err := InsertArtifact(database, "tx-staged-1", "", "/state/artifacts/tx-staged-1/worker", ArtifactStatusStaged); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ClaimApprovedArtifactForDeploy(database)
+	if err != nil {
+		t.Fatalf("ClaimApprovedArtifactForDeploy failed: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected claimed artifact")
+	}
+	if got.TxID != "tx-approved-1" {
+		t.Fatalf("unexpected tx_id: %s", got.TxID)
+	}
+	if got.Status != ArtifactStatusDeploying {
+		t.Fatalf("unexpected claimed status: %s", got.Status)
+	}
+
+	stored, err := GetArtifactByTxID(database, "tx-approved-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != ArtifactStatusDeploying {
+		t.Fatalf("unexpected stored status: %s", stored.Status)
+	}
+	if !stored.DeployStartedAt.Valid {
+		t.Fatal("expected deploy_started_at to be set")
+	}
+}
+
+func TestMarkArtifactDeployCompletedAndFailed(t *testing.T) {
+	database := testDB(t)
+	if err := InsertArtifact(database, "tx-deploy-1", "", "/state/artifacts/tx-deploy-1/worker", ArtifactStatusApproved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClaimApprovedArtifactForDeploy(database); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, err := MarkArtifactDeployCompleted(database, "tx-deploy-1")
+	if err != nil {
+		t.Fatalf("MarkArtifactDeployCompleted failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected completed=true")
+	}
+	updated, err := GetArtifactByTxID(database, "tx-deploy-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != ArtifactStatusDeployedUnstable {
+		t.Fatalf("unexpected status: %s", updated.Status)
+	}
+	if !updated.DeployFinishedAt.Valid {
+		t.Fatal("expected deploy_finished_at to be set")
+	}
+
+	if err := InsertArtifact(database, "tx-deploy-2", "", "/state/artifacts/tx-deploy-2/worker", ArtifactStatusApproved); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClaimApprovedArtifactForDeploy(database); err != nil {
+		t.Fatal(err)
+	}
+	ok, err = MarkArtifactDeployFailed(database, "tx-deploy-2", "sha mismatch")
+	if err != nil {
+		t.Fatalf("MarkArtifactDeployFailed failed: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected failed=true")
+	}
+	failed, err := GetArtifactByTxID(database, "tx-deploy-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != ArtifactStatusDeployFailed {
+		t.Fatalf("unexpected status: %s", failed.Status)
+	}
+	if !failed.LastError.Valid || failed.LastError.String == "" {
+		t.Fatal("expected last_error to be set")
+	}
+}

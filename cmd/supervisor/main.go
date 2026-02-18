@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -59,6 +63,10 @@ func main() {
 	log.Printf("[supervisor] running worker=%s", cfg.WorkerBin)
 
 	for {
+		if err := deployApprovedArtifact(&cfg, database, supEventID); err != nil {
+			log.Printf("[supervisor] deploy approved artifact failed: %v", err)
+		}
+
 		seq, err := db.NextWorkerSeq(database, supEventID)
 		if err != nil {
 			log.Fatalf("[supervisor] failed to get worker seq: %v", err)
@@ -139,6 +147,96 @@ func main() {
 
 		time.Sleep(time.Duration(cfg.RestartDelaySeconds) * time.Second)
 	}
+}
+
+func deployApprovedArtifact(cfg *config.SupervisorConfig, database *sql.DB, supEventID int64) error {
+	artifact, err := db.ClaimApprovedArtifactForDeploy(database)
+	if err != nil {
+		return err
+	}
+	if artifact == nil {
+		return nil
+	}
+	db.LogEvent(database, &supEventID, "update.deploy.started", map[string]any{
+		"tx_id":      artifact.TxID,
+		"bin_path":   artifact.BinPath,
+		"target_bin": cfg.WorkerBin,
+	})
+
+	if artifact.SHA256.Valid && strings.TrimSpace(artifact.SHA256.String) != "" {
+		sum, serr := fileSHA256Hex(artifact.BinPath)
+		if serr != nil {
+			_, _ = db.MarkArtifactDeployFailed(database, artifact.TxID, serr.Error())
+			db.LogEvent(database, &supEventID, "update.deploy.failed", map[string]any{
+				"tx_id":  artifact.TxID,
+				"error":  serr.Error(),
+				"reason": "sha256_read",
+			})
+			return serr
+		}
+		if !strings.EqualFold(sum, artifact.SHA256.String) {
+			msg := fmt.Sprintf("sha256 mismatch: got=%s want=%s", sum, artifact.SHA256.String)
+			_, _ = db.MarkArtifactDeployFailed(database, artifact.TxID, msg)
+			db.LogEvent(database, &supEventID, "update.deploy.failed", map[string]any{
+				"tx_id":  artifact.TxID,
+				"error":  msg,
+				"reason": "sha256_mismatch",
+			})
+			return fmt.Errorf("%s", msg)
+		}
+	}
+
+	if err := atomicSwitchSymlink(cfg.WorkerBin, artifact.BinPath); err != nil {
+		_, _ = db.MarkArtifactDeployFailed(database, artifact.TxID, err.Error())
+		db.LogEvent(database, &supEventID, "update.deploy.failed", map[string]any{
+			"tx_id":  artifact.TxID,
+			"error":  err.Error(),
+			"reason": "switch_symlink",
+		})
+		return err
+	}
+	if ok, err := db.MarkArtifactDeployCompleted(database, artifact.TxID); err != nil {
+		return err
+	} else if !ok {
+		return fmt.Errorf("failed to mark deployed_unstable for tx_id=%s", artifact.TxID)
+	}
+	db.LogEvent(database, &supEventID, "update.deploy.completed", map[string]any{
+		"tx_id": artifact.TxID,
+	})
+	log.Printf("[supervisor] deployed approved artifact tx_id=%s", artifact.TxID)
+	return nil
+}
+
+func fileSHA256Hex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func atomicSwitchSymlink(activeBin, newBinPath string) error {
+	if !filepath.IsAbs(activeBin) || !filepath.IsAbs(newBinPath) {
+		return fmt.Errorf("active/new path must be absolute")
+	}
+	if err := os.MkdirAll(filepath.Dir(activeBin), 0o755); err != nil {
+		return err
+	}
+	tmpLink := activeBin + ".tmp"
+	_ = os.Remove(tmpLink)
+	if err := os.Symlink(newBinPath, tmpLink); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpLink, activeBin); err != nil {
+		_ = os.Remove(tmpLink)
+		return err
+	}
+	return nil
 }
 
 func gitHeadRev(workspaceDir string) string {
