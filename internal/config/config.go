@@ -54,6 +54,9 @@ type WorkerConfig struct {
 	OpenAIChatCompURL         string
 	OpenAIModel               string
 	SystemPrompt              string
+	SystemPromptEnv           string
+	ConfigDir                 string
+	SystemPromptFile          string
 	DBPath                    string
 	WorkspaceDir              string
 	ModelProvider             string
@@ -91,6 +94,16 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 
 	workerInstanceID := envOrDefault("WORKER_INSTANCE_ID", "W000000")
 	parentProcessID := int64(envIntOrDefault("PARENT_PROCESS_ID", 0))
+	configDir, configDirExplicit, err := resolveConfigDir()
+	if err != nil {
+		return WorkerConfig{}, err
+	}
+	if configDirExplicit {
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
+			return WorkerConfig{}, fmt.Errorf("failed to create AUTONOUS_CONFIG_DIR: %w", err)
+		}
+	}
+	systemPromptFile := filepath.Join(configDir, "AUTONOUS.md")
 
 	cfg := WorkerConfig{
 		TelegramAPIBase:           fmt.Sprintf("https://api.telegram.org/bot%s", telegramToken),
@@ -106,7 +119,9 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		OpenAIAPIKey:              openaiKey,
 		OpenAIChatCompURL:         envOrDefault("OPENAI_CHAT_COMPLETIONS_URL", "https://api.openai.com/v1/chat/completions"),
 		OpenAIModel:               envOrDefault("OPENAI_MODEL", "gpt-4o-mini"),
-		SystemPrompt:              envOrDefault("WORKER_SYSTEM_PROMPT", "你是 autonous 的执行 Worker。回复简洁、准确；需要时给出可执行步骤。"),
+		SystemPromptEnv:           os.Getenv("WORKER_SYSTEM_PROMPT"),
+		ConfigDir:                 configDir,
+		SystemPromptFile:          systemPromptFile,
 		DBPath:                    envOrDefault("AUTONOUS_DB_PATH", "/state/agent.db"),
 		WorkspaceDir:              envOrDefault("WORKSPACE_DIR", "/workspace"),
 		ModelProvider:             modelProvider,
@@ -131,6 +146,24 @@ func LoadWorkerConfig() (WorkerConfig, error) {
 		return WorkerConfig{}, err
 	}
 	return cfg, nil
+}
+
+func resolveConfigDir() (string, bool, error) {
+	if v := strings.TrimSpace(os.Getenv("AUTONOUS_CONFIG_DIR")); v != "" {
+		abs, err := filepath.Abs(v)
+		if err != nil {
+			return "", true, fmt.Errorf("resolve AUTONOUS_CONFIG_DIR failed: %w", err)
+		}
+		return filepath.Clean(abs), true, nil
+	}
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		return filepath.Join(xdg, "autonous"), false, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", false, fmt.Errorf("failed to resolve HOME for config dir")
+	}
+	return filepath.Join(home, ".config", "autonous"), false, nil
 }
 
 func envOrDefault(key, fallback string) string {
@@ -187,6 +220,18 @@ func validateWorkerConfig(cfg *WorkerConfig) error {
 	}
 	if !filepath.IsAbs(cfg.UpdateArtifactRoot) {
 		return fmt.Errorf("AUTONOUS_UPDATE_ARTIFACT_ROOT must be absolute")
+	}
+	if strings.TrimSpace(cfg.ConfigDir) == "" {
+		return fmt.Errorf("AUTONOUS_CONFIG_DIR cannot be empty")
+	}
+	if !filepath.IsAbs(cfg.ConfigDir) {
+		return fmt.Errorf("AUTONOUS_CONFIG_DIR must be absolute")
+	}
+	if strings.TrimSpace(cfg.SystemPromptFile) == "" {
+		return fmt.Errorf("system prompt file cannot be empty")
+	}
+	if !filepath.IsAbs(cfg.SystemPromptFile) {
+		return fmt.Errorf("system prompt file must be absolute")
 	}
 	roots, err := parseAllowedRoots(cfg.ToolAllowedRoots)
 	if err != nil {

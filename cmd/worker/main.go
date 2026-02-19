@@ -61,6 +61,21 @@ func main() {
 		log.Printf("[worker] failed to log process.started: %v", err)
 	}
 
+	systemPrompt, promptSource, promptSize, promptReadErr := loadSystemPrompt(&cfg)
+	cfg.SystemPrompt = systemPrompt
+	if promptReadErr != nil {
+		log.Printf("[worker] system prompt file read failed path=%s err=%v", cfg.SystemPromptFile, promptReadErr)
+		db.LogEvent(database, &workerEventID, "system_prompt.load_failed", map[string]any{
+			"path":  cfg.SystemPromptFile,
+			"error": truncate(promptReadErr.Error(), 1000),
+		})
+	}
+	db.LogEvent(database, &workerEventID, "system_prompt.loaded", map[string]any{
+		"source":     promptSource,
+		"config_dir": cfg.ConfigDir,
+		"size_bytes": promptSize,
+	})
+
 	commander, err := newCommander(&cfg)
 	if err != nil {
 		log.Fatalf("[worker] failed to init commander: %v", err)
@@ -1056,6 +1071,42 @@ func gitHeadRev(workspaceDir string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+func builtinSystemPrompt() string {
+	return "你是 autonous 的执行 Worker。回复简洁、准确；需要时给出可执行步骤。"
+}
+
+func injectConfigMeta(prompt, configDir string) string {
+	out := strings.ReplaceAll(prompt, "{AUTONOUS_CONFIG_DIR}", configDir)
+	if strings.Contains(out, "系统提示符文件:") {
+		return out
+	}
+	meta := fmt.Sprintf(
+		"配置目录: %s\n系统提示符文件: %s\n你可以通过 read/write/edit 工具读取和修改该文件，修改在下次会话启动时生效。",
+		configDir,
+		filepath.Join(configDir, "AUTONOUS.md"),
+	)
+	if strings.TrimSpace(out) == "" {
+		return meta
+	}
+	return strings.TrimRight(out, "\n") + "\n\n" + meta
+}
+
+// loadSystemPrompt resolves prompt source with priority: file > env > builtin.
+func loadSystemPrompt(cfg *config.WorkerConfig) (prompt string, source string, sizeBytes int, readErr error) {
+	data, err := os.ReadFile(cfg.SystemPromptFile)
+	if err == nil {
+		return injectConfigMeta(string(data), cfg.ConfigDir), "file", len(data), nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		readErr = err
+	}
+	if strings.TrimSpace(cfg.SystemPromptEnv) != "" {
+		return injectConfigMeta(cfg.SystemPromptEnv, cfg.ConfigDir), "env", len(cfg.SystemPromptEnv), readErr
+	}
+	builtin := builtinSystemPrompt()
+	return injectConfigMeta(builtin, cfg.ConfigDir), "builtin", len(builtin), readErr
 }
 
 // --- DB helper functions ---

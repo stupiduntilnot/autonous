@@ -301,6 +301,93 @@ func TestProcessTask_ToolLoopLS(t *testing.T) {
 	}
 }
 
+func TestLoadSystemPrompt_FromFile(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "AUTONOUS.md")
+	content := "系统指令\n配置目录占位符={AUTONOUS_CONFIG_DIR}"
+	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.WorkerConfig{
+		ConfigDir:        dir,
+		SystemPromptFile: file,
+		SystemPromptEnv:  "env prompt",
+	}
+	prompt, source, size, readErr := loadSystemPrompt(cfg)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if source != "file" {
+		t.Fatalf("unexpected source: %s", source)
+	}
+	if size != len(content) {
+		t.Fatalf("unexpected size: %d", size)
+	}
+	if !strings.Contains(prompt, dir) {
+		t.Fatalf("expected prompt contains config dir, got: %s", prompt)
+	}
+}
+
+func TestLoadSystemPrompt_FromEnvWhenFileMissing(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.WorkerConfig{
+		ConfigDir:        dir,
+		SystemPromptFile: filepath.Join(dir, "AUTONOUS.md"),
+		SystemPromptEnv:  "env-only-prompt",
+	}
+	prompt, source, _, readErr := loadSystemPrompt(cfg)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if source != "env" {
+		t.Fatalf("unexpected source: %s", source)
+	}
+	if !strings.Contains(prompt, "env-only-prompt") {
+		t.Fatalf("expected env prompt content, got: %s", prompt)
+	}
+	if !strings.Contains(prompt, "系统提示符文件:") {
+		t.Fatalf("expected config metadata injected, got: %s", prompt)
+	}
+}
+
+func TestLoadSystemPrompt_FileReadErrorFallsBackToEnv(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.WorkerConfig{
+		ConfigDir:        dir,
+		SystemPromptFile: dir, // read directory to trigger non-not-exist error.
+		SystemPromptEnv:  "env-fallback",
+	}
+	prompt, source, _, readErr := loadSystemPrompt(cfg)
+	if readErr == nil {
+		t.Fatal("expected read error")
+	}
+	if source != "env" {
+		t.Fatalf("unexpected source: %s", source)
+	}
+	if !strings.Contains(prompt, "env-fallback") {
+		t.Fatalf("expected env fallback prompt, got: %s", prompt)
+	}
+}
+
+func TestLoadSystemPrompt_FallsBackToBuiltin(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.WorkerConfig{
+		ConfigDir:        dir,
+		SystemPromptFile: filepath.Join(dir, "AUTONOUS.md"),
+		SystemPromptEnv:  "",
+	}
+	prompt, source, _, readErr := loadSystemPrompt(cfg)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if source != "builtin" {
+		t.Fatalf("unexpected source: %s", source)
+	}
+	if !strings.Contains(prompt, builtinSystemPrompt()) {
+		t.Fatalf("expected builtin prompt content, got: %s", prompt)
+	}
+}
+
 func TestProcessTask_ExtractsFinalAnswerFromJSON(t *testing.T) {
 	database := testWorkerDB(t)
 	commander := &captureCommander{}

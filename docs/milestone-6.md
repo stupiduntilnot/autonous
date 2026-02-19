@@ -145,9 +145,9 @@ func loadSystemPrompt(cfg *config.WorkerConfig) (prompt string, source string) {
 
 ## 任务分解
 
-- [ ] `resolveConfigDir` 函数（含 XDG 支持与环境变量优先级）
-- [ ] `WorkerConfig` 新增 `ConfigDir`、`SystemPromptFile` 字段
-- [ ] `loadSystemPrompt` 函数（含三路 fallback 与 `system_prompt.loaded` 事件）
-- [ ] System prompt 模板注入 `{AUTONOUS_CONFIG_DIR}` 元信息
-- [ ] `go build ./... && go test ./...` 全通过
-- [ ] 文档与实现一致（`milestones.md` 更新）
+- [DONE] `resolveConfigDir` 函数（含 XDG 支持与环境变量优先级）
+- [DONE] `WorkerConfig` 新增 `ConfigDir`、`SystemPromptFile` 字段
+- [DONE] `loadSystemPrompt` 函数（含三路 fallback 与 `system_prompt.loaded` 事件）
+- [DONE] System prompt 模板注入 `{AUTONOUS_CONFIG_DIR}` 元信息
+- [DONE] `go build ./... && go test ./...` 全通过
+- [DONE] 文档与实现一致（`milestones.md` 更新）

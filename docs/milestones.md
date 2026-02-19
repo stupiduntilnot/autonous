@@ -102,7 +102,7 @@
 
 详细设计见 [milestone-5.md](./milestone-5.md)。
 
-## Milestone 6 — 配置目录与系统提示符
+## [DONE] Milestone 6 — 配置目录与系统提示符
 
 ### Goal
 建立标准化用户配置目录（XDG-compliant），将 system prompt 外部化为可读写的 `AUTONOUS.md` 文件，使 Agent 能够在运行时加载自定义指令并自我修改行为。
