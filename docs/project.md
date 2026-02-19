@@ -61,6 +61,7 @@
 - **[Milestone 3: Basic Control Plane](./milestone-3.md)**: 控制平面与 failure handling 设计。
 - **[Milestone 4: Tool Subsystem](./milestone-4.md)**: 工具子系统的详细设计与实施计划。
 - **[Milestone 5: Self-Update Transaction](./milestone-5.md)**: 自更新事务、artifact 部署与回滚设计。
+- **[Milestone 7: Bootstrap Workflow](./milestone-7.md)**: Telegram-first、自带可扩展 skill 的自举工作流设计。
 
 *一份用于指导开发辅助 `LLM` 的原则性文档位于 `AGENTS.md`。*
 
@@ -74,7 +75,7 @@
 
 Docker 容器是 Agent 的服务器，**只启动一次**，持续运行。容器内是一对 Supervisor + Worker 进程。对 Agent 而言，不存在"宿主机"与"容器"的区别——它只知道自己是一对进程。
 
-### 4.1. Bootstrap 阶段（当前）
+### 4.1. Bootstrap 阶段（Milestone 7 前）
 
 Agent 尚不具备自我更新能力。代码修改由宿主机上的开发者（通过 Claude Code 等工具）完成：
 
@@ -82,13 +83,13 @@ Agent 尚不具备自我更新能力。代码修改由宿主机上的开发者�
 2. 进入容器编译新 binary
 3. Worker 退出后，Supervisor 自动启动新版本
 
-### 4.2. 自主阶段（目标）
+### 4.2. 自主阶段（Milestone 7 完成后）
 
 Agent 具备自我更新能力后，宿主机不再参与开发：
 
-1. 用户通过 Telegram 对话指示 Agent 实现功能
-2. Worker 修改代码 → 编译新 binary → kill 自己
-3. Supervisor 启动新版 Worker
+1. 用户通过 Telegram 提需求，Agent 在会话内完成设计收敛（可选通过 skill 同步外部平台）
+2. 设计固定后，Worker 在容器内实现功能、测试、commit、push
+3. Agent 触发 M5 发布事务，Telegram 审批后由 Supervisor 完成部署与结果回报
 
 ### 4.3. 容器管理原则
 
