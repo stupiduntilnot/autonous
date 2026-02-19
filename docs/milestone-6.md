@@ -39,8 +39,9 @@ $AUTONOUS_CONFIG_DIR/AUTONOUS.md
 Worker 启动时：
 
 1. 若 `AUTONOUS.md` 存在，读取其内容作为 system prompt
-2. 若文件不存在，使用内置默认 system prompt（行为与当前相同）
-3. 若文件存在但读取失败，记录警告事件并 fallback 到内置默认值（不中断启动）
+2. 若文件不存在，尝试 `WORKER_SYSTEM_PROMPT` env var
+3. 若文件存在但读取失败，记录警告事件并 fallback 到 `WORKER_SYSTEM_PROMPT` env var
+4. 若前述都不可用，使用内置默认 system prompt（行为与当前相同）
 
 加载结果写入 `events` 表：
 
@@ -50,6 +51,8 @@ Worker 启动时：
 ### Agent 自我修改
 
 Agent 可通过 M4 的 `read`/`write`/`edit` 工具直接操作 `AUTONOUS.md`，修改自身的核心指令。改动立即落盘，下次 Worker 启动时生效。
+
+前提：`AUTONOUS_CONFIG_DIR` 必须包含在 `AUTONOUS_TOOL_ALLOWED_ROOTS` 中，否则 `read`/`write`/`edit` 会被 tool safety policy 拒绝。
 
 System prompt 中需包含以下元信息，让 Agent 知道文件位置：
 
